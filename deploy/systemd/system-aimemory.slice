@@ -1,0 +1,6 @@
+[Unit]
+Description=Persistent no-swap parent for AI inference
+
+[Slice]
+MemoryAccounting=yes
+MemorySwapMax=0

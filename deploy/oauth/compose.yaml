@@ -1,0 +1,51 @@
+services:
+  ai-memory-oauth:
+    extends:
+      file: deploy/compose.defaults.yaml
+      service: default
+    profiles: [https-client]
+    image: ai-memory-oauth:latest
+    container_name: ai-memory-oauth
+    user: 10002:10002
+    entrypoint: [python, /scripts/log-daemon.py]
+    command: [uvicorn, 'gateway.main:create_app', --factory, --host, 0.0.0.0, --port, '8082', --no-access-log]
+    environment:
+      PUBLIC_BASE_URL: https://memory.example.com
+      GOOGLE_CLIENT_ID_FILE: /run/secrets/google_client_id
+      GOOGLE_CLIENT_SECRET_FILE: /run/secrets/google_client_secret
+      JWT_SIGNING_KEY_FILE: /run/secrets/jwt_signing_key
+      STORAGE_ENCRYPTION_KEY_FILE: /run/secrets/storage_encryption_key
+      ALLOWED_EMAIL_FILE: /run/secrets/allowed_email
+      BACKEND_KEY_FILE: /run/secrets/backend_key
+      OAUTH_STATE_DIR: /state/oauth
+      PYTHONDONTWRITEBYTECODE: '1'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ['/tmp:rw,noexec,nosuid,size=64m']
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8082/.well-known/oauth-authorization-server',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [memory-ingress, memory-client, memory-oauth-egress]
+    volumes:
+      - /etc/ai-memory/secrets/ai-memory-oauth/google_client_id:/run/secrets/google_client_id:ro
+      - /etc/ai-memory/secrets/ai-memory-oauth/google_client_secret:/run/secrets/google_client_secret:ro
+      - /etc/ai-memory/secrets/ai-memory-oauth/jwt_signing_key:/run/secrets/jwt_signing_key:ro
+      - /etc/ai-memory/secrets/ai-memory-oauth/storage_encryption_key:/run/secrets/storage_encryption_key:ro
+      - /etc/ai-memory/secrets/ai-memory-oauth/allowed_email:/run/secrets/allowed_email:ro
+      - /etc/ai-memory/secrets/ai-memory/writer_key:/run/secrets/backend_key:ro
+      - /var/lib/containers/ai-memory-oauth:/state
+      - /var/log/containers/ai-memory-oauth:/var/log
+      - /srv/ai-memory/deploy/scripts:/scripts:ro
+networks:
+  memory-ingress:
+    internal: true
+  memory-oauth-egress:
+    driver: bridge

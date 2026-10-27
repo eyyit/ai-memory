@@ -1,0 +1,281 @@
+services:
+  ai-memory-api:
+    extends:
+      file: compose.defaults.yaml
+      service: default
+    image: ai-memory:latest
+    container_name: ai-memory-api
+    hostname: ai-memory-api.example.com
+    user: 10002:10002
+    entrypoint:
+    - python
+    - /scripts/log-daemon.py
+    command:
+    - uvicorn
+    - ai_memory.api:app
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8080'
+    - --no-access-log
+    environment:
+      AI_MEMORY_INSTANCE_ID: home
+      DATABASE_URL_FILE: /run/secrets/database_url
+      QDRANT_URL: http://ai-memory-qdrant:6333
+      QDRANT_API_KEY_FILE: /run/secrets/qdrant_api_key
+      AI_MEMORY_INFERENCE_URL: http://ai-memory-inference:8081
+      AI_MEMORY_INFERENCE_TOKEN_FILE: /run/secrets/inference_token
+      AI_MEMORY_AUTH_FILE: /run/secrets/auth.json
+      PYTHONDONTWRITEBYTECODE: '1'
+    depends_on:
+      ai-memory-postgres:
+        condition: service_healthy
+    networks:
+    - memory-api-db
+    - memory-api-vector
+    - memory-api-model
+    - memory-client
+    read_only: true
+    tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health',
+        timeout=3)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    volumes:
+    - /etc/ai-memory/secrets/ai-memory/database_url:/run/secrets/database_url:ro
+    - /etc/ai-memory/secrets/ai-memory/auth.json:/run/secrets/auth.json:ro
+    - /etc/ai-memory/secrets/ai-memory/monitor_key:/run/secrets/monitor_key:ro
+    - /etc/ai-memory/secrets/ai-memory/qdrant_api_key:/run/secrets/qdrant_api_key:ro
+    - /etc/ai-memory/secrets/ai-memory/inference_token:/run/secrets/inference_token:ro
+    - /srv/ai-memory/deploy/scripts:/scripts:ro
+    - /var/log/containers/ai-memory-api:/var/log
+  ai-memory-inference:
+    extends:
+      file: compose.defaults.yaml
+      service: default
+    image: ai-memory-inference:latest
+    container_name: ai-memory-inference
+    cgroup_parent: system-aimemory.slice
+    user: 10002:10002
+    memswap_limit: 12G
+    entrypoint:
+    - python
+    - /scripts/log-daemon.py
+    command:
+    - uvicorn
+    - ai_memory.inference:app
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8081'
+    - --no-access-log
+    environment:
+      MODEL_CACHE_DIR: /models
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      AI_MEMORY_MODEL_THREADS: '4'
+      AI_MEMORY_INFERENCE_TOKEN_FILE: /run/secrets/inference_token
+      PYTHONDONTWRITEBYTECODE: '1'
+    networks:
+    - memory-api-model
+    - memory-worker-model
+    read_only: true
+    tmpfs:
+    - /tmp:rw,noexec,nosuid,size=512m
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    stop_grace_period: 6m
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 12G
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health',timeout=3)
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 5m
+    volumes:
+    - /etc/ai-memory/secrets/ai-memory/inference_token:/run/secrets/inference_token:ro
+    - /var/lib/containers/ai-memory-inference/models:/models:ro
+    - /srv/ai-memory/deploy/scripts:/scripts:ro
+    - /var/log/containers/ai-memory-inference:/var/log
+  ai-memory-mcp:
+    restart: "no"
+    extends:
+      file: compose.defaults.yaml
+      service: default
+    profiles:
+    - memory-client
+    image: ai-memory:latest
+    user: 10002:10002
+    command:
+    - ai-memory
+    - mcp
+    environment:
+      AI_MEMORY_API_URL: http://ai-memory-api:8080
+      AI_MEMORY_API_TOKEN_FILE: /run/secrets/client_key
+      PYTHONDONTWRITEBYTECODE: '1'
+    networks:
+    - memory-client
+    read_only: true
+    tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    volumes:
+    - /etc/ai-memory/secrets/ai-memory/client_key:/run/secrets/client_key:ro
+  ai-memory-postgres:
+    extends:
+      file: compose.defaults.yaml
+      service: default
+    image: ai-memory-postgres:latest
+    container_name: ai-memory-postgres
+    user: 70:70
+    entrypoint:
+    - python3
+    - /scripts/log-daemon.py
+    command:
+    - /usr/local/bin/docker-entrypoint.sh
+    - postgres
+    environment:
+      POSTGRES_DB: ai_memory
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_admin_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    networks:
+    - memory-api-db
+    - memory-worker-db
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    stop_grace_period: 60s
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready -U postgres -d ai_memory
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+    - /etc/ai-memory/secrets/ai-memory/postgres_admin_password:/run/secrets/postgres_admin_password:ro
+    - /etc/ai-memory/secrets/ai-memory/postgres_password:/run/secrets/postgres_password:ro
+    - /srv/ai-memory/deploy/scripts:/scripts:ro
+    - /srv/ai-memory/deploy/scripts/init-postgres.sh:/docker-entrypoint-initdb.d/01-memory.sh:ro
+    - /var/lib/containers/ai-memory-postgres:/var/lib/postgresql/data
+    - /var/log/containers/ai-memory-postgres:/var/log
+  ai-memory-qdrant:
+    extends:
+      file: compose.defaults.yaml
+      service: default
+    image: ai-memory-qdrant:latest
+    container_name: ai-memory-qdrant
+    user: 10002:10002
+    entrypoint:
+    - python3
+    - /scripts/log-daemon.py
+    command:
+    - ./entrypoint.sh
+    environment:
+      QDRANT__SERVICE__API_KEY_FILE: /run/secrets/qdrant_api_key
+    networks:
+    - memory-api-vector
+    - memory-worker-vector
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - -c
+      - import pathlib,urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:6333/readyz',headers={'api-key':pathlib.Path('/run/secrets/qdrant_api_key').read_text().strip()}),timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+    - /etc/ai-memory/secrets/ai-memory/qdrant_api_key:/run/secrets/qdrant_api_key:ro
+    - /srv/ai-memory/deploy/scripts:/scripts:ro
+    - /var/lib/containers/ai-memory-qdrant/storage:/qdrant/storage
+    - /var/lib/containers/ai-memory-qdrant/snapshots:/qdrant/snapshots
+    - /var/log/containers/ai-memory-qdrant:/var/log
+  ai-memory-worker:
+    extends:
+      file: compose.defaults.yaml
+      service: default
+    image: ai-memory:latest
+    container_name: ai-memory-worker
+    user: 10002:10002
+    entrypoint:
+    - python
+    - /scripts/log-daemon.py
+    command:
+    - ai-memory
+    - worker
+    environment:
+      AI_MEMORY_INSTANCE_ID: home
+      DATABASE_URL_FILE: /run/secrets/database_url
+      QDRANT_URL: http://ai-memory-qdrant:6333
+      QDRANT_API_KEY_FILE: /run/secrets/qdrant_api_key
+      AI_MEMORY_INFERENCE_URL: http://ai-memory-inference:8081
+      AI_MEMORY_INFERENCE_TOKEN_FILE: /run/secrets/inference_token
+      PYTHONDONTWRITEBYTECODE: '1'
+    depends_on:
+      ai-memory-api:
+        condition: service_healthy
+    networks:
+    - memory-worker-db
+    - memory-worker-vector
+    - memory-worker-model
+    read_only: true
+    tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+    - ALL
+    security_opt:
+    - no-new-privileges:true
+    stop_grace_period: 6m
+    volumes:
+    - /etc/ai-memory/secrets/ai-memory/database_url:/run/secrets/database_url:ro
+    - /etc/ai-memory/secrets/ai-memory/qdrant_api_key:/run/secrets/qdrant_api_key:ro
+    - /etc/ai-memory/secrets/ai-memory/inference_token:/run/secrets/inference_token:ro
+    - /srv/ai-memory/deploy/scripts:/scripts:ro
+    - /var/log/containers/ai-memory-worker:/var/log
+networks:
+  memory-api-db:
+    internal: true
+  memory-api-vector:
+    internal: true
+  memory-api-model:
+    internal: true
+  memory-client:
+    internal: true
+  memory-worker-db:
+    internal: true
+  memory-worker-vector:
+    internal: true
+  memory-worker-model:
+    internal: true

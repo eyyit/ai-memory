@@ -1,0 +1,14 @@
+.git
+.venv
+__pycache__
+*.db
+*.env
+backups
+tests
+.pytest_cache
+
+.cache
+.review
+.review-transfer
+*.key
+*.log

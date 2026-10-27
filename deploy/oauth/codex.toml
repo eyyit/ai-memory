@@ -1,0 +1,10 @@
+[mcp_servers.ai_memory_home]
+url = "https://memory.example.com/mcp"
+startup_timeout_sec = 30
+tool_timeout_sec = 90
+default_tools_approval_mode = "writes"
+enabled_tools = ["search_memories", "list_memories", "get_memory", "ingest_memory", "add_memory"]
+[mcp_servers.ai_memory_home.tools.ingest_memory]
+approval_mode = "prompt"
+[mcp_servers.ai_memory_home.tools.add_memory]
+approval_mode = "prompt"
