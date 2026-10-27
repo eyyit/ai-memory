@@ -18,5 +18,5 @@ Validation completed for this snapshot:
   private host addresses, credential artifacts, or recognized secret tokens.
 
 This is not a guarantee that every possible secret pattern is detectable.
-The examples have not been deployed as a new installation. Choose a project
-license separately; this export does not introduce a license grant.
+The examples have not been deployed as a new installation. Project source is licensed under Apache-2.0; dependencies and models retain
+their own licenses.

@@ -47,5 +47,10 @@ they can contain credentials and source evidence. Keep real data, secrets,
 exports, models, environment files, and backups outside this repository.
 
 This is a fresh sanitized source snapshot. Private deployment history and
-operator review bundles are intentionally absent. No license grant is added
-by this export; choose a license before inviting external reuse.
+operator review bundles are intentionally absent. The project is licensed under Apache-2.0. See LICENSE. Dependencies and
+model weights retain their own licenses.
+
+## Private deployment configuration
+
+See PRIVATE-DEPLOYMENT.md for keeping local settings beside public source
+without tracking them or sending them to Docker builds.

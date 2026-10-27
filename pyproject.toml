@@ -5,6 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ai-memory"
 version = "0.2.0"
+license = {file = "LICENSE"}
 description = "Vendor-neutral, provenance-aware personal AI memory service"
 requires-python = ">=3.11"
 dependencies = [

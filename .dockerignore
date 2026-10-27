@@ -12,3 +12,17 @@ tests
 .review-transfer
 *.key
 *.log
+
+# Local-only deployment overlay
+/private/
+/compose.private.yaml
+/deployment.private.env
+*.env.*
+*.sqlite
+*.sqlite3
+*.pem
+*.p12
+*.pfx
+secrets/
+exports/
+models/

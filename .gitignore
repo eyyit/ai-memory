@@ -24,3 +24,8 @@ models/
 data/
 secrets/
 exports/
+
+# Local-only deployment overlay
+/private/
+/compose.private.yaml
+/deployment.private.env
