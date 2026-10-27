@@ -5,6 +5,7 @@ services:
         limits:
           cpus: "2"
           memory: 2G
+    dns_search: ['.']
     init: true
     restart: unless-stopped
     volumes:

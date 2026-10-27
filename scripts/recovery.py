@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """Prepare a private Borg snapshot and perform an isolated recovery drill."""
+
 import argparse
-from contextlib import closing
-from datetime import datetime, timezone
 import hashlib
 import json
 import os
+from contextlib import closing
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+
+SITE_ROOT = Path(__file__).resolve().parents[1]
+SITE_FILE = SITE_ROOT / 'private/runtime.json'
+SITE = json.loads(SITE_FILE.read_text()) if SITE_FILE.exists() else {}
+
 import shutil
 import sqlite3
 import stat
@@ -16,15 +22,32 @@ import tempfile
 import time
 import uuid
 
-BACKUPS = Path('/var/lib/containers/ai-memory-backups')
-OAUTH = Path('/var/lib/containers/ai-memory-oauth')
-CREDS = Path('/etc/ai-memory/secrets')
+BACKUPS = Path(
+  SITE.get('backups_root', '/var/lib/containers/ai-memory-backups')
+)
+OAUTH = Path(
+  SITE.get('oauth_state_root', '/var/lib/containers/ai-memory-oauth')
+)
+CREDS = Path(SITE.get('credentials_root', '/etc/ai-memory/secrets'))
 DB_CONTAINER = 'ai-memory-postgres'
-MAIN_KEYS = ('postgres_password', 'postgres_admin_password', 'database_url',
-             'inference_token', 'qdrant_api_key', 'client_key', 'writer_key',
-             'admin_key', 'auth.json')
-OAUTH_KEYS = ('google_client_id', 'google_client_secret', 'jwt_signing_key',
-              'storage_encryption_key', 'allowed_email')
+MAIN_KEYS = (
+  'postgres_password',
+  'postgres_admin_password',
+  'database_url',
+  'inference_token',
+  'qdrant_api_key',
+  'client_key',
+  'writer_key',
+  'admin_key',
+  'auth.json',
+)
+OAUTH_KEYS = (
+  'google_client_id',
+  'google_client_secret',
+  'jwt_signing_key',
+  'storage_encryption_key',
+  'allowed_email',
+)
 
 
 def run(*args, **kwargs):
@@ -63,8 +86,9 @@ def snapshot_oauth(source, target, timeout_seconds=5):
       raise TimeoutError('OAuth snapshot exceeded its time budget')
 
   uri = database.resolve().as_uri()
-  with closing(sqlite3.connect(uri + '?mode=rw', uri=True,
-                              timeout=timeout_seconds)) as lock:
+  with closing(
+    sqlite3.connect(uri + '?mode=rw', uri=True, timeout=timeout_seconds)
+  ) as lock:
     # DiskCache writes use BEGIN IMMEDIATE too. Readers remain permitted.
     lock.execute('BEGIN IMMEDIATE')
     try:
@@ -88,8 +112,11 @@ def snapshot_oauth(source, target, timeout_seconds=5):
         if not original.resolve().is_relative_to(source.resolve()):
           raise ValueError('OAuth value-file path leaves the store')
         destination = target / relative
-        if relative in {Path('cache.db'), Path('cache.db-wal'),
-                        Path('cache.db-shm')}:
+        if relative in {
+          Path('cache.db'),
+          Path('cache.db-wal'),
+          Path('cache.db-shm'),
+        }:
           raise ValueError('OAuth value file collides with the database')
         if not stat.S_ISREG(original.lstat().st_mode):
           raise ValueError('OAuth value files must be regular files')
@@ -109,35 +136,35 @@ def snapshot_oauth(source, target, timeout_seconds=5):
 
 def write_archive(stage, archive):
   files = {
-      p.relative_to(stage).as_posix(): digest(p)
-      for p in stage.rglob('*')
-      if p.is_file()
+    p.relative_to(stage).as_posix(): digest(p)
+    for p in stage.rglob('*')
+    if p.is_file()
   }
   manifest = {
-      'format':
-          1,
-      'instance':
-          'home',
-      'created_at':
-          datetime.now(timezone.utc).isoformat(),
-      'source_commit':
-          run('git',
-              '-c',
-              'safe.directory=/srv/ai-memory',
-              '-C',
-              '/srv/ai-memory',
-              'rev-parse',
-              'HEAD',
-              capture_output=True,
-              text=True).stdout.strip(),
-      'files':
-          files
+    'format': 1,
+    'instance': 'home',
+    'created_at': datetime.now(timezone.utc).isoformat(),
+    'source_commit': run(
+      'git',
+      '-c',
+      'safe.directory=' + str(SITE_ROOT),
+      '-C',
+      str(SITE_ROOT),
+      'rev-parse',
+      'HEAD',
+      capture_output=True,
+      text=True,
+    ).stdout.strip(),
+    'files': files,
   }
   (stage / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
   (stage / 'manifest.json').chmod(0o600)
   with tarfile.open(archive, 'w:gz') as output:
     for name in [
-        'canonical.dump', 'credentials', 'oauth-state', 'manifest.json'
+      'canonical.dump',
+      'credentials',
+      'oauth-state',
+      'manifest.json',
     ]:
       output.add(stage / name, arcname=name)
 
@@ -152,11 +179,16 @@ def safe_extract(archive, target, max_bytes=2**34):
       if len(members) >= 100000:
         raise ValueError('Too many recovery archive entries')
       name = PurePosixPath(member.name)
-      if (name.is_absolute() or '..' in name.parts or '\\' in member.name or
-          not name.parts or name.parts[0] not in {
-              'canonical.dump', 'credentials', 'oauth-state', 'manifest.json'
-          } or not (member.isfile() or member.isdir()) or
-          name.as_posix() in seen):
+      if (
+        name.is_absolute()
+        or '..' in name.parts
+        or '\\' in member.name
+        or not name.parts
+        or name.parts[0]
+        not in {'canonical.dump', 'credentials', 'oauth-state', 'manifest.json'}
+        or not (member.isfile() or member.isdir())
+        or name.as_posix() in seen
+      ):
         raise ValueError('Unsafe recovery archive entry')
       seen.add(name.as_posix())
       total += member.size
@@ -173,23 +205,28 @@ def verify_manifest(stage):
   if manifest.get('format') != 1 or manifest.get('instance') != 'home':
     raise ValueError('Unexpected recovery format or instance')
   actual = {
-      p.relative_to(stage).as_posix(): digest(p)
-      for p in stage.rglob('*')
-      if p.is_file() and p.relative_to(stage).as_posix() != 'manifest.json'
+    p.relative_to(stage).as_posix(): digest(p)
+    for p in stage.rglob('*')
+    if p.is_file() and p.relative_to(stage).as_posix() != 'manifest.json'
   }
   if actual != manifest.get('files'):
     raise ValueError('Recovery file checksums do not match')
-  required = {'canonical.dump'} | {
-      'credentials/ai-memory/' + n for n in MAIN_KEYS
-  } | {'credentials/ai-memory-oauth/' + n for n in OAUTH_KEYS}
+  required = (
+    {'canonical.dump'}
+    | {'credentials/ai-memory/' + n for n in MAIN_KEYS}
+    | {'credentials/ai-memory-oauth/' + n for n in OAUTH_KEYS}
+  )
   if not required.issubset(actual) or not (stage / 'oauth-state').is_dir():
     raise ValueError('Recovery archive is incomplete')
 
 
 def backup():
   BACKUPS.mkdir(mode=0o700, parents=True, exist_ok=True)
-  if BACKUPS.is_symlink() or BACKUPS.stat().st_uid != 0 or stat.S_IMODE(
-      BACKUPS.stat().st_mode) != 0o700:
+  if (
+    BACKUPS.is_symlink()
+    or BACKUPS.stat().st_uid != 0
+    or stat.S_IMODE(BACKUPS.stat().st_mode) != 0o700
+  ):
     raise ValueError('Backup directory must be private and not a symlink')
   target = BACKUPS / 'home-recovery-current.tar.gz'
   if target.is_symlink():
@@ -198,33 +235,38 @@ def backup():
     stage = Path(temp) / 'contents'
     stage.mkdir(mode=0o700)
     snapshot_oauth(OAUTH / 'oauth', stage / 'oauth-state' / 'oauth')
-    for service, names in [('ai-memory', MAIN_KEYS),
-                           ('ai-memory-oauth', OAUTH_KEYS)]:
+    for service, names in [
+      ('ai-memory', MAIN_KEYS),
+      ('ai-memory-oauth', OAUTH_KEYS),
+    ]:
       for name in names:
-        copy_regular(CREDS / service / name,
-                     stage / 'credentials' / service / name)
+        copy_regular(
+          CREDS / service / name, stage / 'credentials' / service / name
+        )
     with (stage / 'canonical.dump').open('wb') as output:
-      run('docker',
-          'exec',
-          DB_CONTAINER,
-          'pg_dump',
-          '-U',
-          'ai_memory',
-          '-d',
-          'ai_memory',
-          '-Fc',
-          stdout=output)
+      run(
+        'docker',
+        'exec',
+        DB_CONTAINER,
+        'pg_dump',
+        '-U',
+        'ai_memory',
+        '-d',
+        'ai_memory',
+        '-Fc',
+        stdout=output,
+      )
     archive = Path(temp) / 'recovery.tar.gz'
     write_archive(stage, archive)
     archive.chmod(0o600)
     os.replace(archive, target)
   print(
-      'Private consistent snapshot prepared for the existing '
-      'encrypted Borg job:',
-      target)
+    'Private consistent snapshot prepared for the existing encrypted Borg job:',
+    target,
+  )
 
 
-DRILL_CODE = r'''
+DRILL_CODE = r"""
 import asyncio
 import json
 import os
@@ -255,15 +297,20 @@ async def check():
     pass
   print('Restored OAuth records decrypted; gateway initialized:', count)
 asyncio.run(check())
-'''
+"""
 
 
 def drill(bundle):
-  if bundle.is_symlink() or not bundle.is_file() or not bundle.name.startswith(
-      'home-recovery-') or not bundle.name.endswith('.tar.gz'):
+  if (
+    bundle.is_symlink()
+    or not bundle.is_file()
+    or not bundle.name.startswith('home-recovery-')
+    or not bundle.name.endswith('.tar.gz')
+  ):
     raise ValueError('Supply a restored home-recovery-*.tar.gz snapshot')
-  with tempfile.TemporaryDirectory(prefix='recovery-drill-',
-                                   dir=BACKUPS) as temp:
+  with tempfile.TemporaryDirectory(
+    prefix='recovery-drill-', dir=BACKUPS
+  ) as temp:
     root = Path(temp)
     stage = root / 'restored'
     stage.mkdir(mode=0o700)
@@ -272,40 +319,52 @@ def drill(bundle):
     db = 'memory_recovery_drill_' + uuid.uuid4().hex
     created = False
     try:
-      run('docker', 'exec', DB_CONTAINER, 'createdb', '-U', 'postgres', '-T',
-          'template0', db)
+      run(
+        'docker',
+        'exec',
+        DB_CONTAINER,
+        'createdb',
+        '-U',
+        'postgres',
+        '-T',
+        'template0',
+        db,
+      )
       created = True
       with (stage / 'canonical.dump').open('rb') as dump:
-        run('docker',
-            'exec',
-            '-i',
-            DB_CONTAINER,
-            'pg_restore',
-            '-U',
-            'postgres',
-            '-d',
-            db,
-            '--no-owner',
-            '--no-acl',
-            '--single-transaction',
-            stdin=dump)
-      counts = run(
+        run(
           'docker',
           'exec',
+          '-i',
           DB_CONTAINER,
-          'psql',
+          'pg_restore',
           '-U',
           'postgres',
           '-d',
           db,
-          '-At',
-          '-c',
-          'SELECT (SELECT count(*) FROM memories), '
-          '(SELECT count(*) FROM source_revisions), '
-          '(SELECT count(*) FROM extraction_jobs), '
-          '(SELECT count(*) FROM outbox);',
-          capture_output=True,
-          text=True).stdout.strip()
+          '--no-owner',
+          '--no-acl',
+          '--single-transaction',
+          stdin=dump,
+        )
+      counts = run(
+        'docker',
+        'exec',
+        DB_CONTAINER,
+        'psql',
+        '-U',
+        'postgres',
+        '-d',
+        db,
+        '-At',
+        '-c',
+        'SELECT (SELECT count(*) FROM memories), '
+        '(SELECT count(*) FROM source_revisions), '
+        '(SELECT count(*) FROM extraction_jobs), '
+        '(SELECT count(*) FROM outbox);',
+        capture_output=True,
+        text=True,
+      ).stdout.strip()
       print('Disposable PostgreSQL restore passed; counts:', counts)
     finally:
       if created:
@@ -314,28 +373,48 @@ def drill(bundle):
     for path in [state, *state.rglob('*')]:
       os.chown(path, 10002, 10002)
     args = [
-        'docker', 'run', '--rm', '--network', 'none', '--read-only', '--user',
-        '10002:10002', '--cap-drop', 'ALL', '--security-opt',
-        'no-new-privileges:true', '--cpus', '1', '--memory', '512m', '--tmpfs',
-        '/tmp:rw,noexec,nosuid,size=64m', '--entrypoint', 'python', '-i', '-v',
-        f'{state}:/state:rw'
+      'docker',
+      'run',
+      '--rm',
+      '--network',
+      'none',
+      '--read-only',
+      '--user',
+      '10002:10002',
+      '--cap-drop',
+      'ALL',
+      '--security-opt',
+      'no-new-privileges:true',
+      '--cpus',
+      '1',
+      '--memory',
+      '512m',
+      '--tmpfs',
+      '/tmp:rw,noexec,nosuid,size=64m',
+      '--entrypoint',
+      'python',
+      '-i',
+      '-v',
+      f'{state}:/state:rw',
     ]
     fields = {
-        name.upper(): stage / 'credentials' / 'ai-memory-oauth' / name
-        for name in OAUTH_KEYS
+      name.upper(): stage / 'credentials' / 'ai-memory-oauth' / name
+      for name in OAUTH_KEYS
     }
     fields['BACKEND_KEY'] = stage / 'credentials' / 'ai-memory' / 'writer_key'
     for field, path in fields.items():
       os.chown(path, 10002, 10002)
       args += [
-          '-v', f'{path}:/run/secrets/{field}:ro', '-e',
-          f'{field}_FILE=/run/secrets/{field}'
+        '-v',
+        f'{path}:/run/secrets/{field}:ro',
+        '-e',
+        f'{field}_FILE=/run/secrets/{field}',
       ]
     args += ['ai-memory-oauth:latest']
     run(*args, input=DRILL_CODE, text=True)
   print(
-      'Recovery drill passed; live database, sessions and secrets '
-      'were not replaced'
+    'Recovery drill passed; live database, sessions and secrets '
+    'were not replaced'
   )
 
 
@@ -346,7 +425,8 @@ def main():
   args = parser.parse_args()
   if os.geteuid() != 0:
     parser.error(
-        'Run as root only after approving the displayed batch commands')
+      'Run as root only after approving the displayed batch commands'
+    )
   os.umask(0o077)
   if args.action == 'backup':
     backup()

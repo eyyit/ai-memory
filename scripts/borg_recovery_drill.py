@@ -1,34 +1,46 @@
 #!/usr/bin/env python3
 """Restore a memory-only archive through Borg, then run isolation tests."""
-from datetime import datetime, timezone
+
+import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
+
+SITE_ROOT = Path(__file__).resolve().parents[1]
+SITE_FILE = SITE_ROOT / 'private/runtime.json'
+SITE = json.loads(SITE_FILE.read_text()) if SITE_FILE.exists() else {}
+
 import subprocess
 import sys
 import tempfile
 import uuid
 
-REPO = '/data/backup/server'
-BACKUPS = Path('/var/lib/containers/ai-memory-backups')
+REPO = SITE.get('borg_repository', '/data/backup/server')
+BACKUPS = Path(
+  SITE.get('backups_root', '/var/lib/containers/ai-memory-backups')
+)
 SNAPSHOT = BACKUPS / 'home-recovery-current.tar.gz'
 BORG = '/borg-env/bin/borg'
 
 
 def command(*args, restore_dir=None):
   result = [
-      'docker',
-      'run',
-      '--rm',
-      '--network',
-      'none',
-      '--env-file',
-      '/etc/ai-memory/secrets/borgbackup_passphrase.docker',
-      '-v',
-      '/root:/root',
-      '-v',
-      f'{REPO}:{REPO}',
-      '-v',
-      f'{BACKUPS}:{BACKUPS}:ro',
+    'docker',
+    'run',
+    '--rm',
+    '--network',
+    'none',
+    '--env-file',
+    str(
+      Path(SITE.get('credentials_root', '/etc/ai-memory/secrets'))
+      / 'borgbackup_passphrase.docker'
+    ),
+    '-v',
+    '/root:/root',
+    '-v',
+    f'{REPO}:{REPO}',
+    '-v',
+    f'{BACKUPS}:{BACKUPS}:ro',
   ]
   if restore_dir is not None:
     result += ['-v', f'{restore_dir}:/restore', '--workdir', '/restore']
@@ -44,28 +56,29 @@ def main():
   timestamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
   archive = REPO + '::memory-recovery-drill-' + timestamp
   archive += '-' + uuid.uuid4().hex[:8]
-  subprocess.run(command('create', '-C', 'lz4', archive, str(SNAPSHOT)),
-                 check=True)
-  with tempfile.TemporaryDirectory(prefix='borg-recovery-drill-',
-                                   dir=BACKUPS) as temp:
+  subprocess.run(
+    command('create', '-C', 'lz4', archive, str(SNAPSHOT)), check=True
+  )
+  with tempfile.TemporaryDirectory(
+    prefix='borg-recovery-drill-', dir=BACKUPS
+  ) as temp:
     member = SNAPSHOT.as_posix().lstrip('/')
     subprocess.run(
-        command('extract',
-                '--strip-components',
-                '3',
-                archive,
-                member,
-                restore_dir=temp),
-        check=True,
+      command(
+        'extract', '--strip-components', '3', archive, member, restore_dir=temp
+      ),
+      check=True,
     )
     restored = Path(temp) / SNAPSHOT.name
     subprocess.run(
-        [
-            sys.executable,
-            str(Path(__file__).with_name('recovery.py')), 'drill', '--bundle',
-            str(restored)
-        ],
-        check=True,
+      [
+        sys.executable,
+        str(Path(__file__).with_name('recovery.py')),
+        'drill',
+        '--bundle',
+        str(restored),
+      ],
+      check=True,
     )
   print('Borg-backed isolated recovery drill passed:', archive)
   print('No production data was replaced; no archives were pruned')

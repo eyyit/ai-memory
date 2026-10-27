@@ -1,2 +1,3 @@
 include:
   - deploy/compose.yaml
+  - deploy/oauth/compose.yaml

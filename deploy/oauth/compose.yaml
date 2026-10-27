@@ -1,7 +1,7 @@
 services:
   ai-memory-oauth:
     extends:
-      file: deploy/compose.defaults.yaml
+      file: ../compose.defaults.yaml
       service: default
     profiles: [https-client]
     image: ai-memory-oauth:latest

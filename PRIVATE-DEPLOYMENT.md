@@ -1,51 +1,39 @@
-# Keep local deployment settings beside public source
+# One checkout, local overrides
 
-Public source and local-only settings can share one checkout. Keep reusable
-code and safe examples tracked; put site-specific settings in private/.
-Both .gitignore and .dockerignore exclude that directory. Never force-add it.
+Keep reusable source tracked. Keep site-specific configuration in private/.
+Git and Docker ignore private/; do not force-add it. Secrets belong outside
+the checkout. Ignore rules do not erase tracked files or old Git history.
 
-Example layout:
+The root compose.yaml includes the core and optional HTTPS gateway files.
+For a site-specific deployment, private/compose.include.yaml can include
+each base file with its corresponding override:
 
-```text
-ai-memory/
-  src/                     tracked reusable code
-  deploy/                  tracked example configuration
-  private/                 untracked local-only configuration
-    compose.yaml
-    deployment.env
+```yaml
+include:
+  - path:
+      - ../deploy/compose.yaml
+      - ../private/compose.override.yaml
+  - path:
+      - ../deploy/oauth/compose.yaml
+      - ../private/oauth.override.yaml
 ```
 
-Keep secrets in an external secret directory when possible. Use the private
-overlay for paths to those files, hostname settings, and local mount choices.
-Do not bake secrets into images, put them in tool arguments, or print them
-in logs. Back up local-only configuration separately with restricted access.
+The parent stack includes this wrapper. Relative paths resolve from each
+included base file. The HTTPS gateway requires the https-client profile.
+Use `docker compose --profile https-client config --quiet` to validate.
 
-For a configured installation, merge the reviewed overlay explicitly:
+private/runtime.json optionally supplies operator-script settings:
+public_base_url, state_root, log_root, credentials_root, backups_root,
+oauth_state_root, docker_compose_file, borg_backup_script, borg_config_file,
+and borg_repository. These are paths/settings, never secret values.
+Without this file the scripts use generic example defaults. Configure it
+before running host preparation or backup scripts on a real installation.
 
-```sh
-docker compose -f compose.yaml -f private/compose.yaml config --quiet
-```
+Set PUBLIC_BASE_URL in the private gateway override to your HTTPS origin.
+The gateway derives its host/origin allowlist from that explicit setting.
+It does not trust incoming Host headers to choose its public identity.
 
-Adapt all example paths and hostname allowlists first. Some deployment
-examples include fixed source-level example hostnames and assumptions;
-move those into configurable settings before using one public checkout as
-the live installation. This document does not perform that migration.
-
-Verify exclusions before adding real settings:
-
-```sh
-git check-ignore private/compose.yaml private/deployment.env
-git ls-files private
-```
-
-The second command should print nothing. Git ignore rules do not remove
-tracked files or old commits. Never merge a private deployment branch or
-the old private repository history into a public repository merely because
-its current files are ignored. Ignoring part of a tracked file is impossible.
-
-Review staged changes and scan reachable history before publication. Ignore
-rules are an accident-prevention measure, not encryption or access control.
-
-The existing private live deployment remains separate until a migration is
-reviewed. The clean public history can later become the common source base;
-local-only overrides should remain untracked throughout that transition.
+Back up private/ separately with restricted access. Existing credentials,
+database state, logs, and model directories stay outside Git. Review
+`git ls-files private` and `git diff --cached` before every publication.
+Do not merge old private history into a public repository.
