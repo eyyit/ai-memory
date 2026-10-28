@@ -1,0 +1,4 @@
+title = "AI Memory publication guard"
+
+[extend]
+useDefault = true

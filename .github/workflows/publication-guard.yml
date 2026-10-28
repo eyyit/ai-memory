@@ -1,0 +1,20 @@
+name: Publication guard
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  publication-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout complete history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned scanner
+        run: sh scripts/install-gitleaks.sh "$RUNNER_TEMP"
+      - name: Check publication history
+        run: python3 scripts/check-push.py --ci
