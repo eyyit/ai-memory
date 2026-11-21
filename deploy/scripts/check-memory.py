@@ -26,15 +26,24 @@ def request_json(url: str, headers: dict, payload: dict | None = None) -> dict:
 
 
 def queue_state(rows: list[dict]) -> tuple[int, str]:
-  """Judge age and retries, allowing young healthy queues to stay OK."""
+  """Judge age, retries, and quota blocks, allowing young healthy queues to stay OK."""
   state = 0
   metrics = []
+  quota_blocked_total = 0
   for row in rows:
     name = row['name']
     age = max(0, float(row['age'] or 0))
     attempts = int(row['attempts'] or 0)
+    quota_blocked = int(row.get('quota_blocked') or 0)
+    quota_blocked_total += quota_blocked
     warning, critical = (900, 3600) if name == 'extraction' else (300, 900)
-    if age >= critical or attempts >= 10:
+    if name == 'extraction' and quota_blocked > 0:
+      # Weekly quota exhaustion backs off up to 7 days: warn immediately, critical at 7 days.
+      if age >= 604800:
+        state = 2
+      else:
+        state = max(state, 1)
+    elif age >= critical or attempts >= 10:
       state = 2
     elif age >= warning or attempts >= 3:
       state = max(state, 1)
@@ -45,6 +54,8 @@ def queue_state(rows: list[dict]) -> tuple[int, str]:
       f'{name}_max_attempts={attempts};3;10',
       f'{name}_{age_name}={age:.0f}s;{warning};{critical}',
     ])
+    if name == 'extraction':
+      metrics.append(f'extraction_quota_blocked={quota_blocked}')
   return state, ' '.join(metrics)
 
 
@@ -69,6 +80,7 @@ def queue_probe() -> tuple[int, str]:
         query = text(f'''
           SELECT count(*) AS pending,
             count(*) FILTER (WHERE last_error IS NOT NULL) AS failed,
+            count(*) FILTER (WHERE last_error LIKE 'QuotaExhausted:%') AS quota_blocked,
             coalesce(max(attempts), 0) AS attempts,
             coalesce(extract(epoch FROM
               CURRENT_TIMESTAMP - min({age_column})), 0) AS age
@@ -81,7 +93,12 @@ def queue_probe() -> tuple[int, str]:
   finally:
     engine.dispose()
   state, metrics = queue_state(rows)
-  return state, 'job age and retries checked | ' + metrics
+  quota_blocked = sum(int(r.get('quota_blocked') or 0) for r in rows)
+  summary = (
+    'extraction quota exhausted; switch extractor mode to qwen if needed'
+    if quota_blocked > 0 else 'job age and retries checked'
+  )
+  return state, summary + ' | ' + metrics
 
 
 def search_probe() -> tuple[int, str]:

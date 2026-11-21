@@ -18,6 +18,10 @@ class Settings:
     qdrant_collection: str = 'home-minilm-v1'
     inference_url: str = 'http://ai-memory-inference:8081'
     inference_token: str = ''
+    extractor_url: str = ''
+    extractor_socket: str = ''
+    extractor_mode: str = ''
+    extractor_mode_file: str = ''
     oauth_issuer: str = ''
     oauth_jwks_url: str = ''
     oauth_resource: str = ''
@@ -33,6 +37,10 @@ class Settings:
             qdrant_collection=os.getenv('QDRANT_COLLECTION', cls.qdrant_collection),
             inference_url=os.getenv('AI_MEMORY_INFERENCE_URL', cls.inference_url),
             inference_token=env_secret('AI_MEMORY_INFERENCE_TOKEN'),
+            extractor_url=os.getenv('AI_MEMORY_EXTRACTOR_URL', ''),
+            extractor_socket=os.getenv('AI_MEMORY_EXTRACTOR_SOCKET', ''),
+            extractor_mode=os.getenv('AI_MEMORY_EXTRACTOR_MODE', ''),
+            extractor_mode_file=os.getenv('AI_MEMORY_EXTRACTOR_MODE_FILE', ''),
             oauth_issuer=os.getenv('AI_MEMORY_OAUTH_ISSUER', ''),
             oauth_jwks_url=os.getenv('AI_MEMORY_OAUTH_JWKS_URL', ''),
             oauth_resource=os.getenv('AI_MEMORY_OAUTH_RESOURCE', ''),

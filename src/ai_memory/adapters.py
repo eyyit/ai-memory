@@ -1,7 +1,17 @@
 import math
+from pathlib import Path
 from typing import Protocol
 import httpx
 from .inference import EMBEDDING_REVISION, validate_facts
+
+
+class QuotaExhaustedError(RuntimeError):
+    """Raised when an upstream extractor rejects requests due to quota or rate limits."""
+
+    def __init__(self, message: str = 'Extractor quota exhausted', *, retry_after: int | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
 
 class Extractor(Protocol):
     def extract(self, text: str) -> list[dict]: ...
@@ -12,13 +22,57 @@ class VectorIndex(Protocol):
     def delete(self, instance_id, memory_id): ...
     def search(self, instance_id, vector, limit): ...
 
+
 class HTTPExtractor:
-    def __init__(self, url, token, client=None):
-        self.client = client or httpx.Client(base_url=url, headers={'Authorization': 'Bearer ' + token}, timeout=300)
+    def __init__(self, url, token, client=None, *, unix_socket=None):
+        if client is not None:
+            self.client = client
+        else:
+            transport = httpx.HTTPTransport(uds=unix_socket) if unix_socket else None
+            base_url = 'http://localhost' if unix_socket else url
+            self.client = httpx.Client(
+                base_url=base_url,
+                headers={'Authorization': 'Bearer ' + token},
+                timeout=300,
+                transport=transport,
+            )
+
     def extract(self, text):
         response = self.client.post('/v1/extract', json={'text': text})
+        if response.status_code == 429:
+            retry_after = None
+            raw = response.headers.get('retry-after')
+            if raw and raw.strip().isdigit():
+                retry_after = int(raw.strip())
+            raise QuotaExhaustedError('Extractor quota exhausted', retry_after=retry_after)
         response.raise_for_status()
         return validate_facts(response.json()['memories'], text)
+
+
+class SwitchingExtractor:
+    """Routes extraction between primary (e.g. agy) and fallback (e.g. local Qwen) via a live mode toggle."""
+
+    def __init__(self, primary, fallback, *, mode_file='', default_mode='agy'):
+        self.primary = primary
+        self.fallback = fallback
+        self.mode_file = mode_file
+        self.default_mode = default_mode
+
+    def current_mode(self) -> str:
+        if self.mode_file:
+            path = Path(self.mode_file)
+            if path.is_file():
+                value = path.read_text(encoding='utf-8').strip().lower()
+                if value in {'agy', 'qwen', 'local', 'primary', 'fallback'}:
+                    return value
+        return (self.default_mode or 'agy').strip().lower()
+
+    def extract(self, text):
+        mode = self.current_mode()
+        if mode in {'qwen', 'local', 'fallback'}:
+            return self.fallback.extract(text)
+        return self.primary.extract(text)
+
 
 class HTTPEmbedder:
     def __init__(self, url, token, client=None):

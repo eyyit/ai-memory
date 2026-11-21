@@ -143,8 +143,17 @@ class MemoryService:
             if row:
                 row.attempts += 1
                 row.locked_at, row.lease_token = None, None
-                row.last_error = type(exc).__name__ + ': processing failed; check provider'
-                row.available_at = now_utc() + timedelta(seconds=min(3600, 2 ** min(row.attempts, 12)))
+                if type(exc).__name__ == 'QuotaExhaustedError':
+                    retry_after = getattr(exc, 'retry_after', None)
+                    if isinstance(retry_after, int) and retry_after > 0:
+                        delay = max(300, min(86400, retry_after))
+                    else:
+                        delay = min(86400, 1800 * (2 ** min(row.attempts - 1, 6)))
+                    row.last_error = 'QuotaExhausted: extractor quota exhausted; backing off up to 7 days'
+                    row.available_at = now_utc() + timedelta(seconds=delay)
+                else:
+                    row.last_error = type(exc).__name__ + ': processing failed; check provider'
+                    row.available_at = now_utc() + timedelta(seconds=min(3600, 2 ** min(row.attempts, 12)))
 
     def process_extractions(self, *, instance_id=None, max_items=10):
         processed = failed = created = 0

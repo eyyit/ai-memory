@@ -33,6 +33,14 @@ def parser():
     s = commands.add_parser('import-shell')
     s.add_argument('path')
     s.add_argument('--source')
+    b = commands.add_parser('agy-bridge')
+    b.add_argument('--socket', required=True)
+    b.add_argument('--mode', default='0660')
+    b.add_argument('--model-file', default='')
+    b.add_argument('--agy-bin', default='agy')
+    r = commands.add_parser('refresh-agy-model')
+    r.add_argument('--model-file', required=True)
+    r.add_argument('--agy-bin', default='agy')
     return p
 
 def main():
@@ -44,6 +52,21 @@ def main():
     if args.command == 'download-models':
         from .inference import download_models
         download_models()
+        return
+    if args.command == 'refresh-agy-model':
+        from .agy_bridge import refresh_flash_model
+        print(json.dumps(refresh_flash_model(agy_bin=args.agy_bin, model_file=args.model_file)))
+        return
+    if args.command == 'agy-bridge':
+        import os, pathlib, uvicorn
+        from .agy_bridge import create_bridge_app
+        sock = pathlib.Path(args.socket)
+        sock.parent.mkdir(parents=True, exist_ok=True)
+        if sock.exists():
+            sock.unlink()
+        app = create_bridge_app(model_file=args.model_file or None, agy_bin=args.agy_bin)
+        os.umask(0o777 - int(args.mode, 8))
+        uvicorn.run(app, uds=str(sock), access_log=False)
         return
     settings = Settings.from_env()
     service, engine = build_service(settings)
