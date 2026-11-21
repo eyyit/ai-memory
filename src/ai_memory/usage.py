@@ -23,9 +23,12 @@ buckets = Table(
   Column('duration_sum', Float, nullable=False),
   Column('duration_max', Float, nullable=False),
 )
-OPERATIONS = {'search', 'list', 'get', 'add_memory', 'ingest'}
-METHODS = {'search': 'search', 'list': 'list', 'get': 'get',
-           'add_memory': 'add_memory', 'ingest': 'ingest'}
+OPERATIONS = {'search', 'list', 'get', 'context_brief', 'add_memory', 'revise', 'delete', 'ingest'}
+METHODS = {
+  'search': 'search', 'list': 'list', 'get': 'get',
+  'context_brief': 'context_brief', 'add_memory': 'add_memory',
+  'revise': 'revise', 'delete': 'delete', 'ingest': 'ingest',
+}
 _lock = threading.Lock()
 _last_prune = 0.0
 _errors = 0
@@ -97,9 +100,21 @@ class UsageService:
           results = len(value)
           if not results:
             outcome = 'empty'
-        elif operation == 'get':
+        elif operation == 'context_brief' and isinstance(value, dict):
+          results = (
+            len(value.get('pinned', []))
+            + len(value.get('preferences_and_rules', []))
+            + len(value.get('recent', []))
+          )
+          if not results:
+            outcome = 'empty'
+        elif operation in {'get', 'revise'}:
           results = int(value is not None)
           if value is None:
+            outcome = 'empty'
+        elif operation == 'delete':
+          results = int(bool(value))
+          if not value:
             outcome = 'empty'
         elif isinstance(value, dict) and value.get('duplicate'):
           outcome = 'duplicate'
@@ -150,7 +165,7 @@ def report(service, instance_id, hours=24):
       func.sum(buckets.c.calls).label('calls'),
     ).where(buckets.c.instance_id == instance_id,
             buckets.c.hour >= start,
-            buckets.c.operation.in_(['search', 'list', 'get']))
+            buckets.c.operation.in_(['search', 'list', 'get', 'context_brief']))
       .group_by(buckets.c.hour, buckets.c.traffic)
       .order_by(buckets.c.hour)).mappings().all()
   rows = [normalize(row) for row in rows]

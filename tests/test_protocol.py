@@ -22,7 +22,8 @@ def test_mcp_sdk_protocol_readonly_and_authenticated_proxy(monkeypatch):
         async def scenario():
             async with create_connected_server_and_client_session(server) as session:
                 tools = (await session.list_tools()).tools
-                assert {tool.name for tool in tools} == {"search_memories", "get_memory", "list_memories"}
+                assert {tool.name for tool in tools} == {"search_memories", "get_memory", "list_memories", "get_context_brief"}
+                assert all(bool(tool.description and tool.description.strip()) for tool in tools)
                 assert all("token" not in tool.inputSchema.get("properties", {}) for tool in tools)
                 result = await session.call_tool("search_memories", {"query": "hiking"})
                 assert not result.isError
@@ -46,7 +47,7 @@ def test_mcp_sdk_write_tool_explicit_optin(monkeypatch):
         async def scenario():
             async with create_connected_server_and_client_session(server) as session:
                 names = {tool.name for tool in (await session.list_tools()).tools}
-                assert "ingest_memory" in names
+                assert {"ingest_memory", "add_memory", "revise_memory", "delete_memory"}.issubset(names)
                 result = await session.call_tool("ingest_memory", {"source": "test", "source_record_id": "1", "text": "I like hiking"})
                 assert not result.isError
         anyio.run(scenario)
@@ -65,7 +66,7 @@ def test_real_stdio_entrypoint_initializes_without_database(monkeypatch):
         async with stdio_client(params) as (reader, writer):
             async with ClientSession(reader, writer) as session:
                 await session.initialize()
-                assert {tool.name for tool in (await session.list_tools()).tools} == {"search_memories", "get_memory", "list_memories"}
+                assert {tool.name for tool in (await session.list_tools()).tools} == {"search_memories", "get_memory", "list_memories", "get_context_brief"}
     anyio.run(scenario)
 
 def test_native_http_mcp_denies_reader_writes(rig, tmp_path):
@@ -81,8 +82,9 @@ def test_native_http_mcp_denies_reader_writes(rig, tmp_path):
                 async with streamable_http_client('http://testserver/mcp', http_client=client) as (reader, writer, _):
                     async with ClientSession(reader, writer) as session:
                         await session.initialize()
-                        assert 'add_memory' in {t.name for t in (await session.list_tools()).tools}
+                        assert {'add_memory', 'revise_memory', 'delete_memory', 'get_context_brief'}.issubset({t.name for t in (await session.list_tools()).tools})
                         assert not (await session.call_tool('list_memories', {})).isError
+                        assert not (await session.call_tool('get_context_brief', {})).isError
                         result = await session.call_tool('add_memory', {'content': 'Reader should not write', 'source_record_id': '1'})
                         assert result.isError
             async with httpx.AsyncClient(base_url='http://testserver', headers=headers('writer'),
@@ -90,9 +92,22 @@ def test_native_http_mcp_denies_reader_writes(rig, tmp_path):
                 async with streamable_http_client('http://testserver/mcp', http_client=client) as (reader, writer, _):
                     async with ClientSession(reader, writer) as session:
                         await session.initialize()
-                        assert not (await session.call_tool('add_memory', {'content': 'Likes hiking', 'source_record_id': '2'})).isError
+                        added = await session.call_tool('add_memory', {
+                            'content': 'Likes hiking', 'source_record_id': '2',
+                            'memory_type': 'preference', 'tags': ['outdoors'], 'pinned': True,
+                        })
+                        assert not added.isError
+                        mid = rig[0].list('home')[0]['id']
+                        revised = await session.call_tool('revise_memory', {
+                            'memory_id': mid, 'content': 'Likes trail hiking', 'reason': 'more specific',
+                        })
+                        assert not revised.isError
+                        brief = await session.call_tool('get_context_brief', {})
+                        assert not brief.isError and 'Likes trail hiking' in str(brief.content)
+                        deleted = await session.call_tool('delete_memory', {'memory_id': mid})
+                        assert not deleted.isError
     anyio.run(scenario)
-    assert [r['content'] for r in rig[0].list('home')] == ['Likes hiking']
+    assert rig[0].list('home') == []
 
 def test_native_mcp_requires_authentication(rig, tmp_path):
     from fastapi.testclient import TestClient

@@ -80,12 +80,20 @@ class MemoryService:
                 confidence=max(0, min(1, float(row.get('confidence', 0.5))))))
         return memory.id, created
 
-    def add_memory(self, instance_id, content, source_record_id, source='explicit'):
+    def add_memory(self, instance_id, content, source_record_id, source='explicit', *,
+                   memory_type='fact', entities=None, tags=None, pinned=False):
         source = redact_secrets(source)[:64]
         source_record_id = redact_secrets(source_record_id)[:512]
         safe = redact_secrets(content).strip()
         if not safe:
             raise ValueError('Memory cannot be empty')
+        clean_type = redact_secrets(str(memory_type or 'fact')).strip()[:64] or 'fact'
+        clean_entities = redact_value(list(entities))[:20] if entities else []
+        attributes = {'origin': 'explicit'}
+        if tags:
+            attributes['tags'] = [redact_secrets(str(t)).strip()[:64] for t in tags if str(t).strip()][:20]
+        if pinned:
+            attributes['pinned'] = True
         # Explicit submissions are already distilled facts; preserve provenance without model inference.
         for attempt in range(3):
             try:
@@ -106,7 +114,10 @@ class MemoryService:
                         redacted_text=safe, metadata_json={}, extracted_at=now_utc())
                     db.add(revision)
                     db.flush()
-                    mid, created = self._store_fact(db, instance_id, revision, {'content': safe, 'evidence': safe, 'confidence': 1.0, 'attributes': {'origin': 'explicit'}})
+                    mid, created = self._store_fact(db, instance_id, revision, {
+                        'content': safe, 'type': clean_type, 'entities': clean_entities,
+                        'evidence': safe, 'confidence': 1.0, 'attributes': attributes,
+                    })
                     return {'id': mid, 'duplicate': not created}
             except IntegrityError:
                 if attempt == 2: raise
@@ -204,7 +215,7 @@ class MemoryService:
             for memory in memories: db.add(OutboxItem(instance_id=instance_id, memory_id=memory.id))
             return len(memories)
 
-    def search(self, instance_id, query, limit=10):
+    def search(self, instance_id, query, limit=10, *, memory_type: str | None = None):
         query = redact_secrets(query)
         semantic = []
         try:
@@ -212,6 +223,8 @@ class MemoryService:
         except Exception: pass
         with self.sessions() as db:
             scope = [Memory.instance_id == instance_id, Memory.active.is_(True)]
+            if memory_type:
+                scope.append(Memory.memory_type == redact_secrets(memory_type)[:64])
             if db.bind.dialect.name == 'postgresql':
                 vector = func.to_tsvector('english', Memory.content)
                 tsquery = func.websearch_to_tsquery('english', query)
@@ -228,8 +241,75 @@ class MemoryService:
             if not scores: return []
             rows = db.scalars(select(Memory).where(*scope, Memory.id.in_(scores))).all()
             by_id = {row.id: row for row in rows}
-            order = sorted((mid for mid in scores if mid in by_id), key=scores.get, reverse=True)[:limit]
-            return [{'id': mid, 'content': by_id[mid].content, 'type': by_id[mid].memory_type, 'score': scores[mid]} for mid in order]
+            now = now_utc()
+            boosted = {}
+            for mid, base_score in scores.items():
+                if mid not in by_id:
+                    continue
+                updated = by_id[mid].updated_at
+                if updated is not None:
+                    if updated.tzinfo is None:
+                        updated = updated.replace(tzinfo=now.tzinfo)
+                    age_days = max(0.0, (now - updated).total_seconds() / 86400.0)
+                    recency = 1.0 + 0.15 / (1.0 + age_days / 30.0)
+                else:
+                    recency = 1.0
+                boosted[mid] = base_score * recency
+            order = sorted(boosted, key=boosted.get, reverse=True)[:limit]
+            return [{
+                'id': mid,
+                'content': by_id[mid].content,
+                'type': by_id[mid].memory_type,
+                'entities': by_id[mid].entities,
+                'updated_at': by_id[mid].updated_at,
+                'score': boosted[mid],
+            } for mid in order]
+
+    def context_brief(self, instance_id: str, *, pinned_limit: int = 20, recent_limit: int = 15) -> dict:
+        pinned_limit = max(1, min(pinned_limit, 50))
+        recent_limit = max(1, min(recent_limit, 50))
+        def summarize(row):
+            attrs = row.attributes or {}
+            return {
+                'id': row.id,
+                'content': row.content,
+                'type': row.memory_type,
+                'entities': row.entities,
+                'tags': attrs.get('tags', []),
+                'pinned': bool(attrs.get('pinned', False)),
+                'updated_at': row.updated_at,
+            }
+        with self.sessions() as db:
+            total = db.scalar(select(func.count()).select_from(Memory).where(
+                Memory.instance_id == instance_id, Memory.active.is_(True))) or 0
+            rows = db.scalars(select(Memory).where(
+                Memory.instance_id == instance_id, Memory.active.is_(True))
+                .order_by(Memory.updated_at.desc()).limit(200)).all()
+            pinned, core, recent = [], [], []
+            seen = set()
+            for row in rows:
+                attrs = row.attributes or {}
+                if attrs.get('pinned') and len(pinned) < pinned_limit:
+                    pinned.append(summarize(row))
+                    seen.add(row.id)
+            for row in rows:
+                if row.id in seen:
+                    continue
+                if row.memory_type in {'preference', 'rule', 'profile'} and len(core) < pinned_limit:
+                    core.append(summarize(row))
+                    seen.add(row.id)
+            for row in rows:
+                if row.id in seen:
+                    continue
+                if len(recent) < recent_limit:
+                    recent.append(summarize(row))
+                    seen.add(row.id)
+            return {
+                'total_active': int(total),
+                'pinned': pinned,
+                'preferences_and_rules': core,
+                'recent': recent,
+            }
 
     def revise(self, instance_id: str, memory_id: str, *, content: str | None = None,
                memory_type: str | None = None, attributes: dict | None = None,

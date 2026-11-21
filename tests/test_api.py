@@ -26,7 +26,13 @@ def test_server_enforces_read_write_admin_and_revocation(rig, tmp_path):
         assert client.post('/v1/ingest', headers=headers('reader'), json=payload).status_code == 403
         assert client.post('/v1/ingest', headers=headers('writer'), json=payload).status_code == 202
         mid = client.post('/v1/memories', headers=headers('writer'),
-            json={'content': 'Likes tea', 'source_record_id': 'explicit-1'}).json()['id']
+            json={'content': 'Likes tea', 'source_record_id': 'explicit-1',
+                  'type': 'preference', 'entities': ['drinks'], 'tags': ['daily'], 'pinned': True}).json()['id']
+        brief = client.get('/v1/context', headers=headers('reader')).json()
+        assert brief['total_active'] == 1 and brief['pinned'][0]['id'] == mid
+        search_hits = client.get('/v1/memories/search', headers=headers('reader'),
+            params={'q': 'tea', 'memory_type': 'preference'}).json()['items']
+        assert len(search_hits) == 1 and search_hits[0]['updated_at'] is not None
         assert client.patch('/v1/memories/' + mid, headers=headers('reader'), json={'content': 'Changed'}).status_code == 403
         assert client.delete('/v1/memories/' + mid, headers=headers('reader')).status_code == 403
         assert client.post('/v1/index/retry', headers=headers('writer')).status_code == 403

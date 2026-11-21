@@ -145,3 +145,34 @@ def test_chunking_covers_long_source_and_jobs_complete(rig):
     with sessions() as db: assert db.scalar(select(SourceRevision)).extracted_at is None
     svc.process_extractions(instance_id='home')
     with sessions() as db: assert db.scalar(select(SourceRevision)).extracted_at is not None
+
+
+def test_add_memory_metadata_and_context_brief(rig):
+    svc, _, _, _, _ = rig
+    p = svc.add_memory('home', 'Always confirm before restarting prod', 'pin-1',
+        memory_type='rule', entities=['homelab'], tags=['ops', 'safety'], pinned=True)
+    pref = svc.add_memory('home', 'Prefers terse responses', 'pref-1', memory_type='preference')
+    fact = svc.add_memory('home', 'Uses PostgreSQL for canonical store', 'fact-1', memory_type='fact')
+    brief = svc.context_brief('home')
+    assert brief['total_active'] == 3
+    assert [m['id'] for m in brief['pinned']] == [p['id']]
+    assert brief['pinned'][0]['tags'] == ['ops', 'safety']
+    assert brief['pinned'][0]['entities'] == ['homelab']
+    assert [m['id'] for m in brief['preferences_and_rules']] == [pref['id']]
+    assert [m['id'] for m in brief['recent']] == [fact['id']]
+
+
+def test_search_returns_timestamps_filters_type_and_prefers_recent(rig):
+    svc, sessions, _, _, _ = rig
+    old = svc.add_memory('home', 'Deploy target is staging server', 'old-1', memory_type='project', entities=['app'])
+    new = svc.add_memory('home', 'Deploy target is staging server v2', 'new-1', memory_type='project', entities=['app'])
+    svc.add_memory('home', 'Deploy target preference is manual', 'pref-1', memory_type='preference')
+    with sessions.begin() as db:
+        row = db.get(Memory, old['id'])
+        row.updated_at = now_utc() - timedelta(days=120)
+    hits = svc.search('home', 'Deploy target staging', memory_type='project')
+    assert len(hits) == 2
+    assert hits[0]['id'] == new['id']
+    assert hits[0]['updated_at'] is not None
+    assert hits[0]['entities'] == ['app']
+    assert all(h['type'] == 'project' for h in hits)

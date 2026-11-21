@@ -21,6 +21,10 @@ class IngestRequest(BaseModel):
 class AddRequest(BaseModel):
     content: str = Field(min_length=1, max_length=1000)
     source_record_id: str = Field(min_length=1, max_length=512)
+    type: str = Field(default='fact', max_length=64)
+    entities: list[str] | None = Field(default=None, max_length=20)
+    tags: list[str] | None = Field(default=None, max_length=20)
+    pinned: bool = False
 
 class ReviseRequest(BaseModel):
     content: str | None = Field(default=None, min_length=1, max_length=1000)
@@ -85,9 +89,24 @@ def create_app(service=None, settings=None):
     def list_memories(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), principal=Depends(require('read'))):
         return {'items': get_service(principal).list(principal.instance_id, limit=limit, offset=offset)}
 
+    @app.get('/v1/context')
+    def context_brief(
+        pinned_limit: int = Query(20, ge=1, le=50),
+        recent_limit: int = Query(15, ge=1, le=50),
+        principal=Depends(require('read')),
+    ):
+        return get_service(principal).context_brief(
+            principal.instance_id, pinned_limit=pinned_limit, recent_limit=recent_limit
+        )
+
     @app.get('/v1/memories/search')
-    def search(q: str = Query(min_length=1, max_length=2000), limit: int = Query(10, ge=1, le=100), principal=Depends(require('read'))):
-        return {'items': get_service(principal).search(principal.instance_id, q, limit)}
+    def search(
+        q: str = Query(min_length=1, max_length=2000),
+        limit: int = Query(10, ge=1, le=100),
+        memory_type: str | None = Query(default=None, max_length=64),
+        principal=Depends(require('read')),
+    ):
+        return {'items': get_service(principal).search(principal.instance_id, q, limit, memory_type=memory_type)}
 
     @app.get('/v1/memories/{memory_id}')
     def get(memory_id: str, principal=Depends(require('read'))):
@@ -102,8 +121,11 @@ def create_app(service=None, settings=None):
     @app.post('/v1/memories')
     def add(body: AddRequest, principal=Depends(require('write'))):
         try:
-            return get_service(principal).add_memory(principal.instance_id, body.content, body.source_record_id,
-                source='explicit:' + principal.client_id[:50])
+            return get_service(principal).add_memory(
+                principal.instance_id, body.content, body.source_record_id,
+                source='explicit:' + principal.client_id[:50],
+                memory_type=body.type, entities=body.entities, tags=body.tags, pinned=body.pinned,
+            )
         except ValueError: raise HTTPException(409, 'Idempotency key conflicts with existing content')
 
     @app.patch('/v1/memories/{memory_id}')
