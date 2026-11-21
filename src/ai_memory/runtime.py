@@ -9,7 +9,7 @@ def build_extractor(settings: Settings):
     if settings.extractor_socket or settings.extractor_url:
         primary = HTTPExtractor(
             settings.extractor_url or 'http://localhost',
-            settings.inference_token,
+            settings.extractor_token or settings.inference_token,
             unix_socket=settings.extractor_socket or None,
         )
         return SwitchingExtractor(

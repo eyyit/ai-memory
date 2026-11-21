@@ -20,6 +20,7 @@ class Settings:
     inference_token: str = ''
     extractor_url: str = ''
     extractor_socket: str = ''
+    extractor_token: str = ''
     extractor_mode: str = ''
     extractor_mode_file: str = ''
     oauth_issuer: str = ''
@@ -39,6 +40,7 @@ class Settings:
             inference_token=env_secret('AI_MEMORY_INFERENCE_TOKEN'),
             extractor_url=os.getenv('AI_MEMORY_EXTRACTOR_URL', ''),
             extractor_socket=os.getenv('AI_MEMORY_EXTRACTOR_SOCKET', ''),
+            extractor_token=env_secret('AI_MEMORY_EXTRACTOR_TOKEN'),
             extractor_mode=os.getenv('AI_MEMORY_EXTRACTOR_MODE', ''),
             extractor_mode_file=os.getenv('AI_MEMORY_EXTRACTOR_MODE_FILE', ''),
             oauth_issuer=os.getenv('AI_MEMORY_OAUTH_ISSUER', ''),
