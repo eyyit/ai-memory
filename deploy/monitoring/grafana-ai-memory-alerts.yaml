@@ -1,0 +1,101 @@
+{
+  "apiVersion": 1,
+  "groups": [
+    {
+      "orgId": 1,
+      "name": "ai-memory-extraction",
+      "folder": "Home infrastructure",
+      "interval": "1m",
+      "rules": [
+        {
+          "uid": "ai-memory-extraction-quota-exhausted",
+          "title": "AI Memory extraction quota exhausted",
+          "condition": "B",
+          "for": "5m",
+          "noDataState": "OK",
+          "execErrState": "Error",
+          "isPaused": false,
+          "labels": {
+            "stack": "home-monitoring",
+            "severity": "warning"
+          },
+          "annotations": {
+            "summary": "AI Memory extraction is paused on upstream agy quota (backing off up to 7 days).",
+            "description": "Pending extraction jobs hit upstream agy quota limits. Explicit add_memory and search_memories still work normally. To switch extraction to local Qwen immediately (no container restart): echo qwen > /path/to/ai-memory/private/extractor-mode. To switch back to agy after weekly quota resets: echo agy > /path/to/ai-memory/private/extractor-mode. Check queue: docker exec ai-memory-worker ai-memory queue.",
+            "subject_service": "AI Memory extraction quota exhausted",
+            "trigger": "ai_memory_extraction_quota_blocked > 0"
+          },
+          "data": [
+            {
+              "refId": "A",
+              "datasourceUid": "PROMETHEUS_DATASOURCE_UID",
+              "relativeTimeRange": { "from": 600, "to": 0 },
+              "model": {
+                "datasource": { "type": "prometheus", "uid": "PROMETHEUS_DATASOURCE_UID" },
+                "refId": "A",
+                "expr": "max(ai_memory_extraction_quota_blocked)",
+                "instant": true,
+                "range": false
+              }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "__expr__",
+              "relativeTimeRange": { "from": 0, "to": 0 },
+              "model": {
+                "datasource": { "type": "__expr__", "uid": "__expr__" },
+                "refId": "B",
+                "type": "math",
+                "expression": "$A > 0"
+              }
+            }
+          ]
+        },
+        {
+          "uid": "ai-memory-extraction-quota-7d-critical",
+          "title": "AI Memory extraction quota blocked over 7 days",
+          "condition": "B",
+          "for": "5m",
+          "noDataState": "OK",
+          "execErrState": "Error",
+          "isPaused": false,
+          "labels": {
+            "stack": "home-monitoring",
+            "severity": "critical"
+          },
+          "annotations": {
+            "summary": "AI Memory extraction has been quota-blocked for 7+ days.",
+            "description": "Extraction jobs have waited >= 7 days for upstream agy quota. Switch extraction to local Qwen now (no restart): echo qwen > /path/to/ai-memory/private/extractor-mode. Switch back later: echo agy > /path/to/ai-memory/private/extractor-mode.",
+            "subject_service": "AI Memory extraction quota blocked 7d",
+            "trigger": "ai_memory_extraction_quota_blocked > 0 and ai_memory_extraction_oldest_age_seconds >= 604800"
+          },
+          "data": [
+            {
+              "refId": "A",
+              "datasourceUid": "PROMETHEUS_DATASOURCE_UID",
+              "relativeTimeRange": { "from": 600, "to": 0 },
+              "model": {
+                "datasource": { "type": "prometheus", "uid": "PROMETHEUS_DATASOURCE_UID" },
+                "refId": "A",
+                "expr": "(max(ai_memory_extraction_quota_blocked) > bool 0) * (max(ai_memory_extraction_oldest_age_seconds) >= bool 604800)",
+                "instant": true,
+                "range": false
+              }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "__expr__",
+              "relativeTimeRange": { "from": 0, "to": 0 },
+              "model": {
+                "datasource": { "type": "__expr__", "uid": "__expr__" },
+                "refId": "B",
+                "type": "math",
+                "expression": "$A > 0"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

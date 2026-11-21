@@ -57,3 +57,7 @@ def test_unknown_instance_key_and_legacy_token_fail_closed(rig, tmp_path):
     with TestClient(create_app(svc, Settings(api_token='legacy'))) as client:
         assert client.get('/v1/memories', headers={'Authorization': 'Bearer legacy'}).status_code == 200
         assert client.post('/v1/ingest', headers={'Authorization': 'Bearer legacy'}, json={}).status_code == 403
+        metrics = client.get('/metrics')
+        assert metrics.status_code == 200
+        assert 'ai_memory_extraction_quota_blocked 0' in metrics.text
+        assert 'ai_memory_extractor_mode{mode="qwen"} 1' in metrics.text

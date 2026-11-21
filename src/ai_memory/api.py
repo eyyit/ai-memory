@@ -81,6 +81,31 @@ def create_app(service=None, settings=None):
         with get_service().sessions() as db: db.execute(text('SELECT 1'))
         return {'status': 'ok'}
 
+    @app.get('/metrics')
+    def metrics():
+        snap = get_service().metrics_snapshot(settings.instance_id)
+        mode = snap['extractor_mode']
+        lines = [
+            '# HELP ai_memory_extraction_pending Pending extraction chunks.',
+            '# TYPE ai_memory_extraction_pending gauge',
+            f"ai_memory_extraction_pending {snap['extraction_pending']}",
+            '# HELP ai_memory_extraction_quota_blocked Pending extraction chunks blocked by upstream quota.',
+            '# TYPE ai_memory_extraction_quota_blocked gauge',
+            f"ai_memory_extraction_quota_blocked {snap['extraction_quota_blocked']}",
+            '# HELP ai_memory_extraction_oldest_age_seconds Age in seconds of oldest pending extraction chunk.',
+            '# TYPE ai_memory_extraction_oldest_age_seconds gauge',
+            f"ai_memory_extraction_oldest_age_seconds {snap['extraction_oldest_age_seconds']:.1f}",
+            '# HELP ai_memory_index_pending Pending vector index outbox items.',
+            '# TYPE ai_memory_index_pending gauge',
+            f"ai_memory_index_pending {snap['index_pending']}",
+            '# HELP ai_memory_extractor_mode Active extraction provider (1 = active).',
+            '# TYPE ai_memory_extractor_mode gauge',
+            f'ai_memory_extractor_mode{{mode="agy"}} {1 if mode == "agy" else 0}',
+            f'ai_memory_extractor_mode{{mode="qwen"}} {1 if mode == "qwen" else 0}',
+            '',
+        ]
+        return Response('\n'.join(lines), media_type='text/plain; version=0.0.4; charset=utf-8')
+
     @app.get('/v1/me')
     def me(principal=Depends(require('read'))):
         return {'client_id': principal.client_id, 'instance_id': principal.instance_id, 'scopes': sorted(principal.scopes)}

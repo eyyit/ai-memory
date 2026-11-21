@@ -217,6 +217,34 @@ class MemoryService:
                 model.instance_id == instance_id, model.completed_at.is_(None)))
                 for name, model in [('extraction_pending', ExtractionJob), ('index_pending', OutboxItem)]}
 
+    def metrics_snapshot(self, instance_id: str) -> dict:
+        """Return aggregate numeric queue metrics only; never expose content or errors."""
+        now = now_utc()
+        with self.sessions() as db:
+            ext_pending = db.scalar(select(func.count()).select_from(ExtractionJob).where(
+                ExtractionJob.instance_id == instance_id, ExtractionJob.completed_at.is_(None))) or 0
+            ext_quota = db.scalar(select(func.count()).select_from(ExtractionJob).where(
+                ExtractionJob.instance_id == instance_id,
+                ExtractionJob.completed_at.is_(None),
+                ExtractionJob.last_error.like('QuotaExhausted:%'))) or 0
+            oldest = db.scalar(select(func.min(ExtractionJob.created_at)).where(
+                ExtractionJob.instance_id == instance_id, ExtractionJob.completed_at.is_(None)))
+            idx_pending = db.scalar(select(func.count()).select_from(OutboxItem).where(
+                OutboxItem.instance_id == instance_id, OutboxItem.completed_at.is_(None))) or 0
+        oldest_age = 0.0
+        if oldest is not None:
+            if oldest.tzinfo is None:
+                oldest = oldest.replace(tzinfo=now.tzinfo)
+            oldest_age = max(0.0, (now - oldest).total_seconds())
+        mode = self.extractor.current_mode() if hasattr(self.extractor, 'current_mode') else 'qwen'
+        return {
+            'extraction_pending': int(ext_pending),
+            'extraction_quota_blocked': int(ext_quota),
+            'extraction_oldest_age_seconds': oldest_age,
+            'index_pending': int(idx_pending),
+            'extractor_mode': 'qwen' if mode in {'qwen', 'local', 'fallback'} else 'agy',
+        }
+
     def reindex(self, instance_id, *, reset=False):
         if reset: self.index.clear_instance(instance_id)
         with self.sessions.begin() as db:
