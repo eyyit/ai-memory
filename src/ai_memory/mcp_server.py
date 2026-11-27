@@ -97,10 +97,15 @@ def create_http_mcp(service_getter, authenticator, settings):
         return observed_service().list(authorize('read'), limit=max(1, min(limit, 200)), offset=max(0, offset))
 
     @server.tool()
-    def get_memory(memory_id: str):
-        """Fetch full memory details, metadata, and source provenance for a memory UUID."""
+    def get_memory(memory_id: str, sources_limit: int = 20, sources_offset: int = 0):
+        """Fetch memory details, metadata, and bounded paginated source provenance for a memory UUID."""
         iid = authorize('read')
-        return observed_service().get(iid, str(uuid.UUID(memory_id)))
+        return observed_service().get(
+            iid,
+            str(uuid.UUID(memory_id)),
+            sources_limit=max(0, min(sources_limit, 100)),
+            sources_offset=max(0, sources_offset),
+        )
 
     @server.tool()
     def ingest_memory(source: str, source_record_id: str, text: str):
@@ -208,9 +213,13 @@ def create_mcp(settings=None, *, http_client=None):
         return read('/v1/memories', limit=max(1, min(limit, 200)), offset=max(0, offset))['items']
 
     @server.tool()
-    def get_memory(memory_id: str):
-        """Fetch full memory details, metadata, and source provenance for a memory UUID."""
-        return read('/v1/memories/' + str(uuid.UUID(memory_id)))
+    def get_memory(memory_id: str, sources_limit: int = 20, sources_offset: int = 0):
+        """Fetch memory details, metadata, and bounded paginated source provenance for a memory UUID."""
+        return read(
+            '/v1/memories/' + str(uuid.UUID(memory_id)),
+            sources_limit=max(0, min(sources_limit, 100)),
+            sources_offset=max(0, sources_offset),
+        )
 
     if os.getenv('AI_MEMORY_MCP_ALLOW_WRITES', 'false').lower() == 'true':
         @server.tool()

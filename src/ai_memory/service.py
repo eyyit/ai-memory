@@ -382,24 +382,78 @@ class MemoryService:
                 event_type="memory.deleted", payload={}))
             return True
 
-    def get(self, instance_id: str, memory_id: str) -> dict | None:
+    def get(
+        self,
+        instance_id: str,
+        memory_id: str,
+        *,
+        sources_limit: int = 20,
+        sources_offset: int = 0,
+        source_text_max_chars: int = 500,
+    ) -> dict | None:
+        sources_limit = max(0, min(int(sources_limit), 100))
+        sources_offset = max(0, int(sources_offset))
+        source_text_max_chars = max(0, min(int(source_text_max_chars), 4000))
         with self.sessions() as db:
             m = db.scalar(select(Memory).where(Memory.instance_id == instance_id, Memory.id == memory_id, Memory.active.is_(True)))
             if not m: return None
-            links = db.scalars(select(MemorySource).where(MemorySource.memory_id == m.id)).all()
+            base_join = (
+                select(MemorySource, SourceRecord, SourceRevision)
+                .join(SourceRecord, MemorySource.source_record_pk == SourceRecord.id)
+                .join(SourceRevision, MemorySource.source_revision_id == SourceRevision.id)
+                .where(MemorySource.memory_id == m.id, SourceRecord.instance_id == instance_id)
+            )
+            total_sources = int(
+                db.scalar(
+                    select(func.count())
+                    .select_from(MemorySource)
+                    .join(SourceRecord, MemorySource.source_record_pk == SourceRecord.id)
+                    .join(SourceRevision, MemorySource.source_revision_id == SourceRevision.id)
+                    .where(MemorySource.memory_id == m.id, SourceRecord.instance_id == instance_id)
+                )
+                or 0
+            )
             sources = []
-            for link in links:
-                src = db.get(SourceRecord, link.source_record_pk)
-                revision = db.get(SourceRevision, link.source_revision_id)
-                if src and revision and src.instance_id == instance_id:
-                    sources.append({"source": src.source, "source_record_id": src.source_record_id,
-                        "conversation_id": revision.source_conversation_id, "timestamp": revision.source_timestamp,
+            if sources_limit > 0:
+                rows = db.execute(
+                    base_join
+                    .order_by(SourceRevision.created_at.desc(), MemorySource.id.asc())
+                    .offset(sources_offset)
+                    .limit(sources_limit)
+                ).all()
+                for link, src, revision in rows:
+                    raw_text = revision.redacted_text or ""
+                    raw_evidence = link.evidence or ""
+                    text_truncated = len(raw_text) > source_text_max_chars
+                    evidence_truncated = len(raw_evidence) > source_text_max_chars
+                    sources.append({
+                        "source": src.source,
+                        "source_record_id": src.source_record_id,
+                        "conversation_id": revision.source_conversation_id,
+                        "timestamp": revision.source_timestamp,
                         "source_revision": revision.revision,
-                        "source_text": revision.redacted_text, "metadata": revision.metadata_json,
-                        "evidence": link.evidence, "confidence": link.confidence})
-            return {"id": m.id, "content": m.content, "type": m.memory_type, "entities": m.entities,
-                "attributes": m.attributes, "sensitivity": m.sensitivity, "sources": sources,
-                "created_at": m.created_at, "updated_at": m.updated_at}
+                        "source_text": raw_text[:source_text_max_chars],
+                        "source_text_truncated": text_truncated,
+                        "metadata": revision.metadata_json,
+                        "evidence": raw_evidence[:source_text_max_chars],
+                        "evidence_truncated": evidence_truncated,
+                        "confidence": link.confidence,
+                    })
+            return {
+                "id": m.id,
+                "content": m.content,
+                "type": m.memory_type,
+                "entities": m.entities,
+                "attributes": m.attributes,
+                "sensitivity": m.sensitivity,
+                "sources": sources,
+                "sources_total": total_sources,
+                "sources_limit": sources_limit,
+                "sources_offset": sources_offset,
+                "sources_has_more": (sources_offset + len(sources)) < total_sources,
+                "created_at": m.created_at,
+                "updated_at": m.updated_at,
+            }
 
     def list(self, instance_id: str, *, limit=50, offset=0) -> list[dict]:
         with self.sessions() as db:

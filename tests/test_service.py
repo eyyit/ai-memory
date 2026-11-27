@@ -176,3 +176,59 @@ def test_search_returns_timestamps_filters_type_and_prefers_recent(rig):
     assert hits[0]['updated_at'] is not None
     assert hits[0]['entities'] == ['app']
     assert all(h['type'] == 'project' for h in hits)
+
+
+def test_get_uses_bounded_joined_queries_and_paginates_provenance(rig):
+    from sqlalchemy import event
+
+    svc, sessions, extractor, _, _ = rig
+    extractor.results = [{'content': 'Shared durable fact', 'confidence': 0.9}]
+    long_text = 'L' * 1200
+    for i in range(50):
+        svc.ingest(
+            instance_id='home',
+            source='test',
+            source_record_id=f'rec-{i:03d}',
+            text=f'prefix-{i:03d}-' + long_text,
+        )
+    assert svc.process_extractions(instance_id='home', max_items=100)['processed'] == 50
+    mid = svc.list('home')[0]['id']
+
+    engine = sessions.kw['bind']
+    statements = []
+
+    def count_sql(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(engine, 'before_cursor_execute', count_sql)
+    try:
+        page1 = svc.get('home', mid)
+    finally:
+        event.remove(engine, 'before_cursor_execute', count_sql)
+
+    assert len(statements) <= 3, f'Expected <=3 SQL queries, got {len(statements)}'
+    assert page1['sources_total'] == 50
+    assert page1['sources_limit'] == 20
+    assert page1['sources_offset'] == 0
+    assert page1['sources_has_more'] is True
+    assert len(page1['sources']) == 20
+    assert len(page1['sources'][0]['source_text']) == 500
+    assert page1['sources'][0]['source_text_truncated'] is True
+    assert len(page1['sources'][0]['evidence']) == 500
+    assert page1['sources'][0]['evidence_truncated'] is True
+
+    page2 = svc.get('home', mid, sources_limit=20, sources_offset=20)
+    page3 = svc.get('home', mid, sources_limit=20, sources_offset=40)
+    assert len(page2['sources']) == 20 and page2['sources_has_more'] is True
+    assert len(page3['sources']) == 10 and page3['sources_has_more'] is False
+    seen_ids = {
+        s['source_record_id']
+        for page in (page1, page2, page3)
+        for s in page['sources']
+    }
+    assert len(seen_ids) == 50
+
+    # Full untruncated provenance remains preserved in the database.
+    with sessions() as db:
+        rev = db.scalar(select(SourceRevision).limit(1))
+        assert len(rev.redacted_text) > 1200

@@ -38,6 +38,12 @@ def test_server_enforces_read_write_admin_and_revocation(rig, tmp_path):
         assert client.post('/v1/index/retry', headers=headers('writer')).status_code == 403
         assert client.get('/v1/queue', headers=headers('admin')).status_code == 200
         assert client.get('/v1/memories/' + mid, headers=headers('reader')).json()['sources']
+        paged = client.get(
+            '/v1/memories/' + mid,
+            headers=headers('reader'),
+            params={'sources_limit': 1, 'sources_offset': 0},
+        ).json()
+        assert paged['sources_total'] == 1 and paged['sources_has_more'] is False
         assert client.delete('/v1/memories/' + mid, headers=headers('writer')).status_code == 200
         path = tmp_path / 'auth.json'
         values = json.loads(path.read_text())

@@ -134,8 +134,18 @@ def create_app(service=None, settings=None):
         return {'items': get_service(principal).search(principal.instance_id, q, limit, memory_type=memory_type)}
 
     @app.get('/v1/memories/{memory_id}')
-    def get(memory_id: str, principal=Depends(require('read'))):
-        row = get_service(principal).get(principal.instance_id, memory_id)
+    def get(
+        memory_id: str,
+        sources_limit: int = Query(20, ge=0, le=100),
+        sources_offset: int = Query(0, ge=0),
+        principal=Depends(require('read')),
+    ):
+        row = get_service(principal).get(
+            principal.instance_id,
+            memory_id,
+            sources_limit=sources_limit,
+            sources_offset=sources_offset,
+        )
         if row is None: raise HTTPException(404, 'Memory not found')
         return row
 
