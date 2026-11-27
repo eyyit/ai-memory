@@ -22,10 +22,13 @@ The parent stack includes this wrapper. Relative paths resolve from each
 included base file. The HTTPS gateway requires the https-client profile.
 Use `docker compose --profile https-client config --quiet` to validate.
 
-private/runtime.json optionally supplies operator-script settings:
+`private/runtime.json` (or host-level `/etc/ai-memory/runtime.json`, or
+`AI_MEMORY_RUNTIME_CONFIG`) optionally supplies operator-script settings:
 public_base_url, state_root, log_root, credentials_root, backups_root,
 oauth_state_root, docker_compose_file, borg_backup_script, borg_config_file,
 and borg_repository. These are paths/settings, never secret values.
+Host-level `/etc/ai-memory/runtime.json` (0600 root:root) is preferred for
+promoted root checkouts so repo updates never drop local path overrides.
 Without this file the scripts use generic example defaults. Configure it
 before running host preparation or backup scripts on a real installation.
 

@@ -11,7 +11,23 @@ from pathlib import Path
 
 SITE_ROOT = Path(__file__).resolve().parents[2]
 SITE_FILE = SITE_ROOT / 'private/runtime.json'
-SITE = json.loads(SITE_FILE.read_text()) if SITE_FILE.exists() else {}
+ETC_SITE_FILE = Path('/etc/ai-memory/runtime.json')
+
+
+def _load_site_settings():
+  override = os.environ.get('AI_MEMORY_RUNTIME_CONFIG')
+  if override:
+    return json.loads(Path(override).read_text())
+  for candidate in (SITE_FILE, ETC_SITE_FILE):
+    try:
+      if candidate.is_file() and not candidate.is_symlink():
+        return json.loads(candidate.read_text())
+    except PermissionError:
+      continue
+  return {}
+
+
+SITE = _load_site_settings()
 
 import secrets
 
