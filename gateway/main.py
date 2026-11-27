@@ -30,8 +30,9 @@ REDIRECTS = [
   'https://chatgpt.com/connector_platform_oauth_redirect',
   'https://chatgpt.com/connector/oauth/*',
 ]
+CLIENT_REGISTRATIONS_COLLECTION = 'mcp-oauth-proxy-clients'
 PUBLIC_OAUTH_COLLECTIONS = frozenset({
-  'mcp-oauth-proxy-clients',
+  CLIENT_REGISTRATIONS_COLLECTION,
   'mcp-oauth-transactions',
   'mcp-consent-csrf-tokens',
   'mcp-authorization-codes',
@@ -74,38 +75,149 @@ class PartitionedKeyValue:
       return self.public_store
     return self.grant_store
 
+  async def promote_client(self, client_id):
+    """Move an active client's registration into the non-evicting primary store."""
+    if not client_id:
+      return False
+    existing = await self.grant_store.get(
+      key=client_id, collection=CLIENT_REGISTRATIONS_COLLECTION
+    )
+    if existing is not None:
+      return True
+    record = await self.public_store.get(
+      key=client_id, collection=CLIENT_REGISTRATIONS_COLLECTION
+    )
+    if record is None:
+      return False
+    await self.grant_store.put(
+      key=client_id, value=record, collection=CLIENT_REGISTRATIONS_COLLECTION
+    )
+    await self.public_store.delete(
+      key=client_id, collection=CLIENT_REGISTRATIONS_COLLECTION
+    )
+    return True
+
   async def get(self, key, *, collection=None):
+    if collection == CLIENT_REGISTRATIONS_COLLECTION:
+      val = await self.grant_store.get(key=key, collection=collection)
+      if val is not None:
+        return val
+      return await self.public_store.get(key=key, collection=collection)
     return await self._store_for(collection).get(key=key, collection=collection)
 
   async def get_many(self, keys, *, collection=None):
+    if collection == CLIENT_REGISTRATIONS_COLLECTION:
+      keys_list = list(keys)
+      grant_vals = list(
+        await self.grant_store.get_many(keys=keys_list, collection=collection)
+      )
+      missing_idx = [i for i, v in enumerate(grant_vals) if v is None]
+      if missing_idx:
+        pub_vals = await self.public_store.get_many(
+          keys=[keys_list[i] for i in missing_idx], collection=collection
+        )
+        for idx, val in zip(missing_idx, pub_vals):
+          grant_vals[idx] = val
+      return grant_vals
     return await self._store_for(collection).get_many(
       keys=keys, collection=collection
     )
 
   async def put(self, key, value, *, collection=None, ttl=None):
+    if collection == CLIENT_REGISTRATIONS_COLLECTION:
+      if (
+        await self.grant_store.get(key=key, collection=collection) is not None
+      ):
+        return await self.grant_store.put(
+          key=key, value=value, collection=collection, ttl=ttl
+        )
+      return await self.public_store.put(
+        key=key, value=value, collection=collection, ttl=ttl
+      )
     return await self._store_for(collection).put(
       key=key, value=value, collection=collection, ttl=ttl
     )
 
   async def put_many(self, keys, values, *, collection=None, ttl=None):
+    if collection == CLIENT_REGISTRATIONS_COLLECTION:
+      keys_list = list(keys)
+      values_list = list(values)
+      grant_existing = await self.grant_store.get_many(
+        keys=keys_list, collection=collection
+      )
+      g_keys, g_vals, p_keys, p_vals = [], [], [], []
+      for k, v, existing in zip(keys_list, values_list, grant_existing):
+        if existing is not None:
+          g_keys.append(k)
+          g_vals.append(v)
+        else:
+          p_keys.append(k)
+          p_vals.append(v)
+      if g_keys:
+        await self.grant_store.put_many(
+          keys=g_keys, values=g_vals, collection=collection, ttl=ttl
+        )
+      if p_keys:
+        await self.public_store.put_many(
+          keys=p_keys, values=p_vals, collection=collection, ttl=ttl
+        )
+      return None
     return await self._store_for(collection).put_many(
       keys=keys, values=values, collection=collection, ttl=ttl
     )
 
   async def delete(self, key, *, collection=None):
+    if collection == CLIENT_REGISTRATIONS_COLLECTION:
+      d1 = await self.grant_store.delete(key=key, collection=collection)
+      d2 = await self.public_store.delete(key=key, collection=collection)
+      return bool(d1 or d2)
     return await self._store_for(collection).delete(
       key=key, collection=collection
     )
 
   async def delete_many(self, keys, *, collection=None):
+    if collection == CLIENT_REGISTRATIONS_COLLECTION:
+      keys_list = list(keys)
+      d1 = await self.grant_store.delete_many(
+        keys=keys_list, collection=collection
+      )
+      d2 = await self.public_store.delete_many(
+        keys=keys_list, collection=collection
+      )
+      if isinstance(d1, int) and isinstance(d2, int):
+        return d1 + d2
+      return bool(d1 or d2)
     return await self._store_for(collection).delete_many(
       keys=keys, collection=collection
     )
 
   async def ttl(self, key, *, collection=None):
+    if collection == CLIENT_REGISTRATIONS_COLLECTION:
+      res = await self.grant_store.ttl(key=key, collection=collection)
+      found = res[0] is not None if isinstance(res, tuple) else res is not None
+      if found:
+        return res
+      return await self.public_store.ttl(key=key, collection=collection)
     return await self._store_for(collection).ttl(key=key, collection=collection)
 
   async def ttl_many(self, keys, *, collection=None):
+    if collection == CLIENT_REGISTRATIONS_COLLECTION:
+      keys_list = list(keys)
+      grant_res = list(
+        await self.grant_store.ttl_many(keys=keys_list, collection=collection)
+      )
+      missing_idx = [
+        i
+        for i, r in enumerate(grant_res)
+        if (r[0] is None if isinstance(r, tuple) else r is None)
+      ]
+      if missing_idx:
+        pub_res = await self.public_store.ttl_many(
+          keys=[keys_list[i] for i in missing_idx], collection=collection
+        )
+        for idx, val in zip(missing_idx, pub_res):
+          grant_res[idx] = val
+      return grant_res
     return await self._store_for(collection).ttl_many(
       keys=keys, collection=collection
     )
@@ -535,6 +647,18 @@ class SingleUserGoogle(GoogleProvider):
       return None
     return mapping
 
+  async def _promote_active_client(self, client_id):
+    promote = getattr(self._client_storage, 'promote_client', None)
+    if callable(promote) and client_id:
+      await promote(client_id)
+
+  async def exchange_authorization_code(self, client, authorization_code):
+    result = await super().exchange_authorization_code(
+      client, authorization_code
+    )
+    await self._promote_active_client(getattr(client, 'client_id', None))
+    return result
+
   async def load_refresh_token(self, client, refresh_token):
     result = await super().load_refresh_token(client, refresh_token)
     if (
@@ -542,6 +666,7 @@ class SingleUserGoogle(GoogleProvider):
       or await self.active_mapping(refresh_token, 'refresh') is None
     ):
       return None
+    await self._promote_active_client(getattr(client, 'client_id', None))
     return result
 
   async def exchange_refresh_token(self, client, refresh_token, scopes):
@@ -564,6 +689,7 @@ class SingleUserGoogle(GoogleProvider):
         )
         if await self.active_mapping(result.access_token) is None:
           raise TokenError('invalid_grant', 'Session revoked during refresh')
+        await self._promote_active_client(getattr(client, 'client_id', None))
         return result
     finally:
       entry[1] -= 1

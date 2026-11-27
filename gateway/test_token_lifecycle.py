@@ -618,3 +618,164 @@ def test_concurrent_refresh_only_succeeds_once(tmp_path):
         assert await p.load_refresh_token(client(), successes[0].refresh_token) is not None
 
     anyio.run(run)
+
+
+def test_v01_pre_migration_client_in_primary_store_remains_readable_and_refreshable(tmp_path):
+    """V01: existing OAuth client registrations in primary grant_store remain readable & refreshable after partition split."""
+    async def run():
+        allowed_file = tmp_path / "allowed-email"
+        allowed_file.write_text("owner@example.com")
+        key = Fernet.generate_key()
+        state_dir = tmp_path / "oauth"
+
+        # Seed a pre-migration client & grant directly into the old single-store provider.
+        legacy = provider(state_dir, allowed_file, key)
+        legacy_client = OAuthClientInformationFull(
+            client_id="pre-migration-client",
+            client_name="Legacy MCP Client",
+            redirect_uris=["http://127.0.0.1/callback"],
+            grant_types=["authorization_code", "refresh_token"],
+            token_endpoint_auth_method="none",
+        )
+        await legacy.register_client(legacy_client)
+        grant = await seed_grant(legacy, "v01-legacy", client_id="pre-migration-client")
+
+        # Reopen with the new partitioned storage pointing at the same primary state_dir.
+        storage = make_oauth_storage(
+            state_dir=state_dir,
+            public_state_dir=tmp_path / "oauth-public",
+            fernet_key=key,
+        )
+        p = SingleUserGoogle(
+            allowed_email_file=allowed_file,
+            client_id="synthetic-google-client",
+            client_secret="synthetic-google-secret",
+            base_url="https://memory.example.com",
+            redirect_path="/oauth2/callback",
+            required_scopes=SCOPES,
+            valid_scopes=SCOPES,
+            client_storage=storage,
+            jwt_signing_key=b"01234567890123456789012345678901",
+            allowed_client_redirect_uris=REDIRECTS,
+            fallback_refresh_token_expiry_seconds=3600,
+            fastmcp_access_token_expiry_seconds=900,
+            forward_resource=False,
+            enable_cimd=False,
+        )
+        p.get_routes()
+        try:
+            loaded_client = await p.get_client("pre-migration-client")
+            assert loaded_client is not None
+            assert loaded_client.client_id == "pre-migration-client"
+
+            with patch.object(
+                p, "_upstream_oauth_client", return_value=SyntheticOAuthClientContext()
+            ):
+                refreshed = await p.exchange_refresh_token(
+                    loaded_client,
+                    RefreshToken(
+                        token=grant["refresh"],
+                        client_id="pre-migration-client",
+                        scopes=SCOPES,
+                    ),
+                    SCOPES,
+                )
+            assert refreshed.access_token != grant["access"]
+            assert refreshed.refresh_token and refreshed.refresh_token != grant["refresh"]
+        finally:
+            await storage.close()
+
+    anyio.run(run)
+
+
+def test_v07_active_client_registration_promoted_and_survives_public_store_eviction(tmp_path):
+    """V07: active client registration is promoted to non-evicting primary store and survives public store flooding."""
+    async def run():
+        allowed_file = tmp_path / "allowed-email"
+        allowed_file.write_text("owner@example.com")
+        key = Fernet.generate_key()
+        storage = make_oauth_storage(
+            state_dir=tmp_path / "oauth",
+            public_state_dir=tmp_path / "oauth-public",
+            fernet_key=key,
+            public_max_size=65536,
+        )
+        p = SingleUserGoogle(
+            allowed_email_file=allowed_file,
+            client_id="synthetic-google-client",
+            client_secret="synthetic-google-secret",
+            base_url="https://memory.example.com",
+            redirect_path="/oauth2/callback",
+            required_scopes=SCOPES,
+            valid_scopes=SCOPES,
+            client_storage=storage,
+            jwt_signing_key=b"01234567890123456789012345678901",
+            allowed_client_redirect_uris=REDIRECTS,
+            fallback_refresh_token_expiry_seconds=3600,
+            fastmcp_access_token_expiry_seconds=900,
+            forward_resource=False,
+            enable_cimd=False,
+            register_quota_max=500,
+        )
+        p.get_routes()
+        try:
+            active_id = "active-dcr-client"
+            await p.register_client(
+                OAuthClientInformationFull(
+                    client_id=active_id,
+                    client_name="Active Client",
+                    redirect_uris=["http://127.0.0.1/callback"],
+                    grant_types=["authorization_code", "refresh_token"],
+                    token_endpoint_auth_method="none",
+                )
+            )
+            # Before token issuance/refresh, unauthenticated DCR lives in bounded public_store only.
+            assert await storage.public_store.get(
+                key=active_id, collection="mcp-oauth-proxy-clients"
+            ) is not None
+            assert await storage.grant_store.get(
+                key=active_id, collection="mcp-oauth-proxy-clients"
+            ) is None
+
+            grant = await seed_grant(p, "v07-active", client_id=active_id)
+            with patch.object(
+                p, "_upstream_oauth_client", return_value=SyntheticOAuthClientContext()
+            ):
+                refreshed = await p.exchange_refresh_token(
+                    client(active_id),
+                    RefreshToken(
+                        token=grant["refresh"], client_id=active_id, scopes=SCOPES
+                    ),
+                    SCOPES,
+                )
+            assert refreshed.refresh_token
+
+            # After active grant refresh, client registration is promoted to non-evicting grant_store.
+            assert await storage.grant_store.get(
+                key=active_id, collection="mcp-oauth-proxy-clients"
+            ) is not None
+
+            # Flood the tiny public_store with unauthenticated DCR registrations to trigger eviction.
+            for i in range(150):
+                await p.register_client(
+                    OAuthClientInformationFull(
+                        client_id=f"flood-client-{i}",
+                        client_name=f"flood-{i}-" + ("z" * 200),
+                        redirect_uris=[f"http://127.0.0.1:{10000 + i}/callback"],
+                    )
+                )
+
+            # Confirm public_store actually evicted early flood entries.
+            assert await storage.public_store.get(
+                key="flood-client-0", collection="mcp-oauth-proxy-clients"
+            ) is None
+
+            # Active client registration MUST still be retrievable and refreshable via get_client!
+            loaded = await p.get_client(active_id)
+            assert loaded is not None
+            assert loaded.client_id == active_id
+            assert await p.load_refresh_token(loaded, refreshed.refresh_token) is not None
+        finally:
+            await storage.close()
+
+    anyio.run(run)
