@@ -55,7 +55,7 @@ class MemoryService:
                     chunk_number=number, text=part))
             return {'source_record_id': record.id, 'duplicate': False, 'pending': True, 'memories_created': 0}
 
-    def _store_fact(self, db, instance_id, revision, row):
+    def _store_fact(self, db, instance_id, revision, row, *, restore_deleted: bool = False):
         content = redact_secrets(str(row['content'])).strip()
         if not content:
             return None, False
@@ -73,11 +73,30 @@ class MemoryService:
             db.add(MemoryEvent(instance_id=instance_id, memory_id=memory.id, event_type='memory.created',
                 payload={'source_revision_id': revision.id}))
             db.add(OutboxItem(instance_id=instance_id, memory_id=memory.id))
+        elif not memory.active:
+            if not restore_deleted:
+                # Preserve tombstone suppression for automatic extraction.
+                return memory.id, False
+            latest = db.scalar(select(func.max(MemoryRevision.revision)).where(MemoryRevision.memory_id == memory.id)) or 0
+            memory.active = True
+            memory.content = content
+            memory.memory_type = str(row.get('type', memory.memory_type))[:64]
+            memory.entities = redact_value(row.get('entities') or [])
+            memory.attributes = redact_value(row.get('attributes') or {})
+            memory.updated_at = now_utc()
+            db.add(MemoryRevision(memory_id=memory.id, revision=latest + 1, content=memory.content,
+                memory_type=memory.memory_type, entities=memory.entities, attributes=memory.attributes,
+                change_reason='restored'))
+            db.add(MemoryEvent(instance_id=instance_id, memory_id=memory.id, event_type='memory.restored',
+                payload={'source_revision_id': revision.id, 'revision': latest + 1}))
+            db.add(OutboxItem(instance_id=instance_id, memory_id=memory.id))
+            created = True
         link = db.scalar(select(MemorySource).where(MemorySource.memory_id == memory.id, MemorySource.source_revision_id == revision.id))
         if not link:
             db.add(MemorySource(memory_id=memory.id, source_record_pk=revision.source_record_pk,
                 source_revision_id=revision.id, evidence=redact_secrets(str(row.get('evidence', revision.redacted_text))),
                 confidence=max(0, min(1, float(row.get('confidence', 0.5))))))
+            db.flush()
         return memory.id, created
 
     def add_memory(self, instance_id, content, source_record_id, source='explicit', *,
@@ -117,7 +136,7 @@ class MemoryService:
                     mid, created = self._store_fact(db, instance_id, revision, {
                         'content': safe, 'type': clean_type, 'entities': clean_entities,
                         'evidence': safe, 'confidence': 1.0, 'attributes': attributes,
-                    })
+                    }, restore_deleted=True)
                     return {'id': mid, 'duplicate': not created}
             except IntegrityError:
                 if attempt == 2: raise
@@ -173,8 +192,17 @@ class MemoryService:
                     if job is None: continue
                     revision = db.scalar(select(SourceRevision).where(SourceRevision.id == job.source_revision_id).with_for_update())
                     job_created = 0
+                    seen_digests = set()
                     for row in rows:
-                        _, new = self._store_fact(db, iid, revision, redact_value(row))
+                        clean_row = redact_value(row)
+                        raw_content = redact_secrets(str(clean_row.get('content', ''))).strip()
+                        if not raw_content:
+                            continue
+                        digest = canonical_hash(raw_content)
+                        if digest in seen_digests:
+                            continue
+                        seen_digests.add(digest)
+                        _, new = self._store_fact(db, iid, revision, clean_row)
                         job_created += int(new)
                     job.completed_at, job.locked_at, job.lease_token, job.last_error = now_utc(), None, None, None
                     db.flush()
@@ -319,28 +347,49 @@ class MemoryService:
         with self.sessions() as db:
             total = db.scalar(select(func.count()).select_from(Memory).where(
                 Memory.instance_id == instance_id, Memory.active.is_(True))) or 0
-            rows = db.scalars(select(Memory).where(
-                Memory.instance_id == instance_id, Memory.active.is_(True))
-                .order_by(Memory.updated_at.desc()).limit(200)).all()
             pinned, core, recent = [], [], []
             seen = set()
-            for row in rows:
+
+            # Scan across the full active tenant scope so older pinned memories never vanish.
+            for row in db.scalars(
+                select(Memory)
+                .where(Memory.instance_id == instance_id, Memory.active.is_(True))
+                .order_by(Memory.updated_at.desc())
+                .execution_options(yield_per=200)
+            ):
                 attrs = row.attributes or {}
-                if attrs.get('pinned') and len(pinned) < pinned_limit:
+                if attrs.get('pinned'):
                     pinned.append(summarize(row))
                     seen.add(row.id)
-            for row in rows:
-                if row.id in seen:
-                    continue
-                if row.memory_type in {'preference', 'rule', 'profile'} and len(core) < pinned_limit:
-                    core.append(summarize(row))
-                    seen.add(row.id)
-            for row in rows:
-                if row.id in seen:
-                    continue
-                if len(recent) < recent_limit:
-                    recent.append(summarize(row))
-                    seen.add(row.id)
+                    if len(pinned) >= pinned_limit:
+                        break
+
+            core_query = (
+                select(Memory)
+                .where(
+                    Memory.instance_id == instance_id,
+                    Memory.active.is_(True),
+                    Memory.memory_type.in_(('preference', 'rule', 'profile')),
+                )
+                .order_by(Memory.updated_at.desc())
+            )
+            if seen:
+                core_query = core_query.where(Memory.id.notin_(seen))
+            for row in db.scalars(core_query.limit(pinned_limit)).all():
+                core.append(summarize(row))
+                seen.add(row.id)
+
+            recent_query = (
+                select(Memory)
+                .where(Memory.instance_id == instance_id, Memory.active.is_(True))
+                .order_by(Memory.updated_at.desc())
+            )
+            if seen:
+                recent_query = recent_query.where(Memory.id.notin_(seen))
+            for row in db.scalars(recent_query.limit(recent_limit)).all():
+                recent.append(summarize(row))
+                seen.add(row.id)
+
             return {
                 'total_active': int(total),
                 'pinned': pinned,
