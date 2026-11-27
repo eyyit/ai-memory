@@ -150,6 +150,33 @@ def snapshot_oauth(source, target, timeout_seconds=5):
       raise
 
 
+def resolve_source_commit():
+  meta_path = SITE_ROOT.parent / 'meta.json'
+  if (
+    SITE_ROOT.name == 'tree'
+    and meta_path.is_file()
+    and not meta_path.is_symlink()
+  ):
+    commit = json.loads(meta_path.read_text()).get('commit')
+    if (
+      isinstance(commit, str)
+      and len(commit) == 40
+      and all(c in '0123456789abcdef' for c in commit)
+    ):
+      return commit
+  return run(
+    'git',
+    '-c',
+    'safe.directory=' + str(SITE_ROOT),
+    '-C',
+    str(SITE_ROOT),
+    'rev-parse',
+    'HEAD',
+    capture_output=True,
+    text=True,
+  ).stdout.strip()
+
+
 def write_archive(stage, archive):
   files = {
     p.relative_to(stage).as_posix(): digest(p)
@@ -160,17 +187,7 @@ def write_archive(stage, archive):
     'format': 1,
     'instance': 'home',
     'created_at': datetime.now(timezone.utc).isoformat(),
-    'source_commit': run(
-      'git',
-      '-c',
-      'safe.directory=' + str(SITE_ROOT),
-      '-C',
-      str(SITE_ROOT),
-      'rev-parse',
-      'HEAD',
-      capture_output=True,
-      text=True,
-    ).stdout.strip(),
+    'source_commit': resolve_source_commit(),
     'files': files,
   }
   (stage / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')

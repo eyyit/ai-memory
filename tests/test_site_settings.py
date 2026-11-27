@@ -62,3 +62,13 @@ def test_recovery_reads_env_override(tmp_path, monkeypatch):
   assert str(module.BACKUPS) == settings['backups_root']
   assert str(module.OAUTH) == settings['oauth_state_root']
   assert str(module.CREDS) == settings['credentials_root']
+
+
+def test_recovery_resolves_commit_from_promoted_release_meta(tmp_path):
+  release = tmp_path / '20261127T235625Z-74606e7eb2e1-c6a24d'
+  tree = release / 'tree'
+  tree.mkdir(parents=True)
+  commit = '74606e7eb2e1a76cf3d4ea261a291cd2d5846ba2'
+  (release / 'meta.json').write_text(json.dumps({'commit': commit}))
+  module = _load_recovery_copy(tree, 'recovery_promoted_meta')
+  assert module.resolve_source_commit() == commit
