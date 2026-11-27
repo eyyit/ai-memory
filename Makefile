@@ -1,0 +1,16 @@
+.PHONY: check test venv check-push
+
+PYTEST := $(if $(wildcard .venv/bin/pytest),.venv/bin/pytest,PYTHONPATH=src pytest)
+
+venv:
+	python3 -m venv .venv
+	.venv/bin/python -m pip install --upgrade pip
+	.venv/bin/python -m pip install -e '.[test]' -r gateway/requirements.txt
+
+check: test
+
+test:
+	$(PYTEST) -q
+
+check-push:
+	python3 scripts/check-push.py --ci
