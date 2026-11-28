@@ -831,13 +831,30 @@ def make_server(provider, backend):
     },
     meta={'securitySchemes': [{'type': 'oauth2', 'scopes': SCOPES}]},
   )
-  async def add_memory(content: str, source_record_id: str):
+  async def add_memory(
+    content: str,
+    source_record_id: str,
+    memory_type: str = 'fact',
+    entities: list[str] | None = None,
+    tags: list[str] | None = None,
+    pinned: bool = False,
+  ):
     if not 0 < len(content) <= 1000 or not 0 < len(source_record_id) <= 512:
       raise ValueError('Memory fields out of bounds')
+    body = {
+      'content': content,
+      'source_record_id': source_record_id,
+      'memory_type': memory_type,
+      'pinned': bool(pinned),
+    }
+    if entities is not None:
+      body['entities'] = list(entities)[:20]
+    if tags is not None:
+      body['tags'] = list(tags)[:20]
     return await call(
       'POST',
       '/v1/memories',
-      body={'content': content, 'source_record_id': source_record_id},
+      body=body,
     )
 
   return server
