@@ -63,6 +63,14 @@ def command(*args, restore_dir=None):
   return result + ['borgbackup:latest', BORG, *args]
 
 
+def strip_components_for_member(snapshot_path: Path) -> tuple[str, int]:
+  member = snapshot_path.as_posix().lstrip('/')
+  parts = [part for part in member.split('/') if part]
+  if not parts:
+    raise ValueError(f'Invalid snapshot path: {snapshot_path}')
+  return member, len(parts) - 1
+
+
 def main():
   if os.geteuid() != 0:
     raise SystemExit('Run as root after approving the displayed commands')
@@ -78,11 +86,13 @@ def main():
   with tempfile.TemporaryDirectory(
     prefix='borg-recovery-drill-', dir=BACKUPS
   ) as temp:
-    member = SNAPSHOT.as_posix().lstrip('/')
+    member, strip_count = strip_components_for_member(SNAPSHOT)
+    extract_args = ['extract']
+    if strip_count > 0:
+      extract_args += ['--strip-components', str(strip_count)]
+    extract_args += [archive, member]
     subprocess.run(
-      command(
-        'extract', '--strip-components', '3', archive, member, restore_dir=temp
-      ),
+      command(*extract_args, restore_dir=temp),
       check=True,
     )
     restored = Path(temp) / SNAPSHOT.name

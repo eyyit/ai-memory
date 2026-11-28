@@ -20,7 +20,7 @@ class Embedder(Protocol):
 class VectorIndex(Protocol):
     def upsert(self, instance_id, memory_id, vector, payload): ...
     def delete(self, instance_id, memory_id): ...
-    def search(self, instance_id, vector, limit): ...
+    def search(self, instance_id, vector, limit, *, memory_type: str | None = None): ...
 
 
 class HTTPExtractor:
@@ -89,7 +89,7 @@ class HTTPEmbedder:
 class NoopIndex:
     def upsert(self, *args): pass
     def delete(self, *args): pass
-    def search(self, *args): return []
+    def search(self, *args, **kwargs): return []
     def clear_instance(self, *args): pass
 
 class QdrantIndex:
@@ -103,6 +103,7 @@ class QdrantIndex:
         if not self.client.collection_exists(self.collection):
             self.client.create_collection(self.collection, vectors_config=models.VectorParams(size=size, distance=models.Distance.COSINE))
             self.client.create_payload_index(self.collection, "instance_id", field_schema=models.PayloadSchemaType.KEYWORD)
+            self.client.create_payload_index(self.collection, "type", field_schema=models.PayloadSchemaType.KEYWORD)
 
     @staticmethod
     def _point_id(instance_id: str, memory_id: str) -> str:
@@ -126,12 +127,15 @@ class QdrantIndex:
                 key="instance_id", match=models.MatchValue(value=instance_id))]))
             self.client.delete(self.collection, selector, wait=True)
 
-    def search(self, instance_id, vector, limit):
+    def search(self, instance_id, vector, limit, *, memory_type: str | None = None):
         from qdrant_client.http import models
         if not self.client.collection_exists(self.collection):
             return []
+        must = [models.FieldCondition(key="instance_id", match=models.MatchValue(value=instance_id))]
+        if memory_type:
+            must.append(models.FieldCondition(key="type", match=models.MatchValue(value=memory_type)))
         response = self.client.query_points(self.collection, query=vector,
-            query_filter=models.Filter(must=[models.FieldCondition(key="instance_id", match=models.MatchValue(value=instance_id))]),
+            query_filter=models.Filter(must=must),
             limit=limit, with_payload=True)
         hits = response.points
         return [(str(hit.payload["memory_id"]), float(hit.score)) for hit in hits if hit.payload and "memory_id" in hit.payload]

@@ -2,7 +2,7 @@ import hashlib
 from datetime import timedelta
 from sqlalchemy import select, func, or_, update
 from sqlalchemy.exc import IntegrityError
-from .models import Memory, MemorySource, MemoryRevision, MemoryEvent, SourceRecord, SourceRevision, ExtractionJob, OutboxItem, now_utc, new_id
+from .models import Memory, MemorySource, MemoryRevision, MemoryEvent, SourceRecord, SourceRevision, ExtractionJob, OutboxItem, ProviderCooldown, now_utc, new_id
 from .security import redact_secrets, redact_value, sha256_text
 
 def canonical_hash(content):
@@ -124,6 +124,9 @@ class MemoryService:
                         if record.raw_hash != sha256_text(safe):
                             raise ValueError('Idempotency key already used for different content')
                         mid = db.scalar(select(MemorySource.memory_id).where(MemorySource.source_revision_id == revision.id))
+                        memory = db.get(Memory, mid) if mid else None
+                        if memory is None or not memory.active:
+                            raise ValueError('Idempotency key refers to a deleted memory; use a new source_record_id to restore')
                         return {'id': mid, 'duplicate': True}
                     record = SourceRecord(instance_id=instance_id, source=redact_secrets(source)[:64],
                         source_record_id=redact_secrets(source_record_id)[:512], redacted_text=safe, raw_hash=sha256_text(safe))
@@ -156,7 +159,27 @@ class MemoryService:
             if claimed.rowcount != 1: return None
             return item.id, token, item.instance_id
 
-    def _failure(self, model, job_id, token, exc):
+    def _extractor_provider(self) -> str:
+        if hasattr(self.extractor, 'current_mode'):
+            mode = str(self.extractor.current_mode() or '').strip().lower()
+            return 'qwen' if mode in {'qwen', 'local', 'fallback'} else 'agy'
+        explicit = getattr(self.extractor, 'provider', None)
+        if explicit:
+            return str(explicit)[:64]
+        return type(self.extractor).__name__[:64]
+
+    def _provider_cooldown_active(self, provider: str) -> bool:
+        now = now_utc()
+        with self.sessions() as db:
+            row = db.get(ProviderCooldown, provider)
+            if row is None or row.cooldown_until is None:
+                return False
+            until = row.cooldown_until
+            if until.tzinfo is None:
+                until = until.replace(tzinfo=now.tzinfo)
+            return until > now
+
+    def _failure(self, model, job_id, token, exc, *, provider: str | None = None):
         with self.sessions.begin() as db:
             row = db.scalar(select(model).where(model.id == job_id, model.lease_token == token).with_for_update())
             if row:
@@ -168,8 +191,21 @@ class MemoryService:
                         delay = max(300, min(86400, retry_after))
                     else:
                         delay = min(86400, 1800 * (2 ** min(row.attempts - 1, 6)))
+                    now = now_utc()
+                    until = now + timedelta(seconds=delay)
                     row.last_error = 'QuotaExhausted: extractor quota exhausted; backing off up to 7 days'
-                    row.available_at = now_utc() + timedelta(seconds=delay)
+                    row.available_at = until
+                    if provider:
+                        cd = db.get(ProviderCooldown, provider)
+                        if cd is None:
+                            db.add(ProviderCooldown(provider=provider, cooldown_until=until, updated_at=now))
+                        else:
+                            existing = cd.cooldown_until
+                            if existing is not None and existing.tzinfo is None:
+                                existing = existing.replace(tzinfo=now.tzinfo)
+                            if existing is None or until > existing:
+                                cd.cooldown_until = until
+                            cd.updated_at = now
                 else:
                     row.last_error = type(exc).__name__ + ': processing failed; check provider'
                     row.available_at = now_utc() + timedelta(seconds=min(3600, 2 ** min(row.attempts, 12)))
@@ -177,6 +213,9 @@ class MemoryService:
     def process_extractions(self, *, instance_id=None, max_items=10):
         processed = failed = created = 0
         for _ in range(max_items):
+            provider = self._extractor_provider()
+            if self._provider_cooldown_active(provider):
+                break
             claim = self._claim(ExtractionJob, instance_id)
             if not claim: break
             job_id, token, iid = claim
@@ -212,7 +251,7 @@ class MemoryService:
                 processed += 1
                 created += job_created
             except Exception as exc:
-                self._failure(ExtractionJob, job_id, token, exc)
+                self._failure(ExtractionJob, job_id, token, exc, provider=provider)
                 failed += 1
         return {'processed': processed, 'failed': failed, 'memories_created': created}
 
@@ -282,14 +321,19 @@ class MemoryService:
 
     def search(self, instance_id, query, limit=10, *, memory_type: str | None = None):
         query = redact_secrets(query)
+        clean_type = redact_secrets(memory_type)[:64] if memory_type else None
         semantic = []
         try:
-            semantic = self.index.search(instance_id, self.embedder.embed(query), limit*3)
+            vector = self.embedder.embed(query)
+            if clean_type is not None:
+                semantic = self.index.search(instance_id, vector, limit*3, memory_type=clean_type)
+            else:
+                semantic = self.index.search(instance_id, vector, limit*3)
         except Exception: pass
         with self.sessions() as db:
             scope = [Memory.instance_id == instance_id, Memory.active.is_(True)]
-            if memory_type:
-                scope.append(Memory.memory_type == redact_secrets(memory_type)[:64])
+            if clean_type:
+                scope.append(Memory.memory_type == clean_type)
             if db.bind.dialect.name == 'postgresql':
                 vector = func.to_tsvector('english', Memory.content)
                 tsquery = func.websearch_to_tsquery('english', query)

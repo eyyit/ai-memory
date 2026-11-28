@@ -140,3 +140,10 @@ class ExtractionJob(Base):
 
 
 Index("ix_extraction_ready", ExtractionJob.completed_at, ExtractionJob.available_at, ExtractionJob.locked_at)
+
+
+class ProviderCooldown(Base):
+    __tablename__ = "provider_cooldowns"
+    provider: Mapped[str] = mapped_column(String(64), primary_key=True)
+    cooldown_until: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
