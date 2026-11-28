@@ -1,6 +1,7 @@
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,7 +51,7 @@ class UsageTest(unittest.TestCase):
       'sqlite:///' + str(Path(self.temp.name) / 'test.db'))
     self.addCleanup(self.engine.dispose)
     usage.metadata.create_all(self.engine)
-    usage._last_prune = 0
+    usage._last_prune = None
     usage._errors = 0
     self.service = Service(self.engine)
     self.client = usage.UsageService(self.service, 'writer', 'rest')
@@ -106,7 +107,8 @@ class UsageTest(unittest.TestCase):
         instance_id='home', hour=datetime.now(timezone.utc)-timedelta(days=31),
         operation='search', traffic='client', transport='rest',
         outcome='success', calls=1, results=1, duration_sum=1, duration_max=1))
-    self.client.search('home', 'a')
+    with unittest.mock.patch.object(usage.time, 'monotonic', return_value=100.0):
+      self.client.search('home', 'a')
     self.assertEqual(len(self.rows()), 1)
 
   def test_counts_persist_across_service_recreation(self):

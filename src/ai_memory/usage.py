@@ -30,7 +30,7 @@ METHODS = {
   'revise': 'revise', 'delete': 'delete', 'ingest': 'ingest',
 }
 _lock = threading.Lock()
-_last_prune = 0.0
+_last_prune = None
 _errors = 0
 
 
@@ -66,7 +66,8 @@ def record(service, instance, operation, traffic, transport, outcome,
       },
     ))
     with _lock:
-      if time.monotonic() - _last_prune > 3600:
+      if (_last_prune is None or _last_prune <= 0.0
+          or time.monotonic() - _last_prune > 3600):
         db.execute(delete(buckets).where(
           buckets.c.hour < now - timedelta(days=30)))
         _last_prune = time.monotonic()

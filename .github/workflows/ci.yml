@@ -49,4 +49,4 @@ jobs:
           python -m pip install "pytest>=8,<9" -r gateway/requirements.txt
 
       - name: Run gateway test suite
-        run: pytest -q tests/test_oauth_snapshot.py
+        run: python -m pytest -q --noconftest tests/test_oauth_snapshot.py
