@@ -844,7 +844,7 @@ def make_server(provider, backend):
     body = {
       'content': content,
       'source_record_id': source_record_id,
-      'memory_type': memory_type,
+      'type': memory_type,
       'pinned': bool(pinned),
     }
     if entities is not None:
